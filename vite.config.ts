@@ -3,10 +3,10 @@ import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 import { defineConfig } from "vite";
 
-import runtimeErrorOverlay from "@replit/vite-plugin-runtime-error-modal";
-
 const isBuild = process.argv.includes("build");
 
+// Frontend dev-server port. The Express API runs separately (default 3001)
+// and is reached through the /api proxy configured below.
 const port = Number(process.env.PORT || 5000);
 
 if (!isBuild && (Number.isNaN(port) || port <= 0)) {
@@ -14,36 +14,15 @@ if (!isBuild && (Number.isNaN(port) || port <= 0)) {
 }
 
 const basePath = process.env.BASE_PATH || "/";
+const apiTarget = process.env.API_PROXY_TARGET || "http://localhost:3001";
 
 export default defineConfig({
   base: basePath,
-  plugins: [
-    react(),
-    tailwindcss(),
-    runtimeErrorOverlay(),
-    ...(process.env.NODE_ENV !== "production" &&
-    process.env.REPL_ID !== undefined
-      ? [
-          await import("@replit/vite-plugin-cartographer").then((m) =>
-            m.cartographer({
-              root: path.resolve(import.meta.dirname, ".."),
-            }),
-          ),
-          await import("@replit/vite-plugin-dev-banner").then((m) =>
-            m.devBanner(),
-          ),
-        ]
-      : []),
-  ],
+  plugins: [react(), tailwindcss()],
   resolve: {
     alias: {
       "@": path.resolve(import.meta.dirname, "src"),
-      "@assets": path.resolve(
-        import.meta.dirname,
-        "..",
-        "..",
-        "attached_assets",
-      ),
+      "@assets": path.resolve(import.meta.dirname, "attached_assets"),
     },
     dedupe: ["react", "react-dom"],
   },
@@ -65,7 +44,7 @@ export default defineConfig({
     },
     proxy: {
       "/api": {
-        target: "http://localhost:3001",
+        target: apiTarget,
         changeOrigin: true,
       },
     },

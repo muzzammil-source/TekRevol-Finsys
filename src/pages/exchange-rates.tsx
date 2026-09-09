@@ -105,7 +105,7 @@ export default function ExchangeRates() {
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [entryToEdit, setEntryToEdit] = useState<any>(null);
 
-  const { data: rates, isLoading } = useListExchangeRates({ month }, { query: { queryKey: ['exchange-rates', month] } });
+  const { data: rates, isLoading } = useListExchangeRates({ month }, { query: { queryKey: ['exchange-rates', month] } }) as { data: any[] | undefined; isLoading: boolean };
   const deleteRate = useDeleteExchangeRate();
   const queryClient = useQueryClient();
   const { toast } = useToast();

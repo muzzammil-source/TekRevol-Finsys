@@ -7,3 +7,11 @@ dist/
 .env.local
 finance.db-shm
 finance.db-wal
+
+# Local env
+.env*
+!.env.example
+
+# Editor
+.vscode/
+.idea/

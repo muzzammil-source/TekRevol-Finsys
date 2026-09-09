@@ -139,7 +139,7 @@ export default function BankSpending() {
   const [notice, setNotice] = useState('');
 
   const transactionFeed = useMemo(() => (unpostedTransactions as any) || {}, [unpostedTransactions]);
-  const allTransactions = useMemo(() => transactionFeed.transactions || [], [transactionFeed]);
+  const allTransactions = useMemo<any[]>(() => transactionFeed.transactions || [], [transactionFeed]);
   const accounts = useMemo(() => (plaidAccounts as any[]) || [], [plaidAccounts]);
 
   useEffect(() => {
@@ -158,7 +158,8 @@ export default function BankSpending() {
     return () => window.clearTimeout(timer);
   }, [notice]);
 
-  const onPlaidSuccess = useCallback((publicToken: string, metadata: any) => {
+  const onPlaidSuccess = useCallback((publicToken: string | null, metadata: any) => {
+    if (!publicToken) return;
     exchangeToken.mutate(
       {
         publicToken,
@@ -254,7 +255,7 @@ export default function BankSpending() {
   const pendingCount = Number(transactionFeed.counts?.pending || 0);
   const postedCount = Number(transactionFeed.counts?.posted || 0);
   const excludedCount = Number(transactionFeed.counts?.excluded || 0);
-  const currentIds = filteredTransactions.map(transactionKey);
+  const currentIds: string[] = filteredTransactions.map(transactionKey);
   const allSelected = currentIds.length > 0 && currentIds.every((id) => selectedRows.has(id));
 
   const toggleRow = (id: string) => {
