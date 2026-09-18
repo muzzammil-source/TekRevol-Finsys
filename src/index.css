@@ -39,6 +39,11 @@
   --color-destructive-foreground: hsl(var(--destructive-foreground));
   --color-destructive-border: var(--destructive-border);
 
+  --color-tint-positive: hsl(var(--tint-positive));
+  --color-tint-positive-foreground: hsl(var(--tint-positive-foreground));
+  --color-tint-negative: hsl(var(--tint-negative));
+  --color-tint-negative-foreground: hsl(var(--tint-negative-foreground));
+
   --color-chart-1: hsl(var(--chart-1));
   --color-chart-2: hsl(var(--chart-2));
   --color-chart-3: hsl(var(--chart-3));
@@ -76,44 +81,58 @@
   --elevate-1: rgba(0, 0, 0, 0.03);
   --elevate-2: rgba(0, 0, 0, 0.08);
 
-  --background: 0 0% 100%;
-  --foreground: 224 71.4% 4.1%;
-  --border: 220 13% 91%;
+  /* Enterprise slate palette (2026-09-17, Stripe/Xero-inspired):
+     canvas #F8FAFC, white cards, #E2E8F0 gridlines, #CBD5E1 control
+     borders, navy #0F172A primary, #64748B secondary text. */
+  --background: 210 40% 98%;
+  --foreground: 222.2 47.4% 11.2%;
+  --border: 214.3 31.8% 91.4%;
   --card: 0 0% 100%;
-  --card-foreground: 224 71.4% 4.1%;
-  --card-border: 220 13% 91%;
-  
-  /* Dark sidebar */
-  --sidebar: 224 71% 4%;
-  --sidebar-foreground: 210 20% 98%;
-  --sidebar-border: 226 50% 10%;
-  --sidebar-primary: 224 71.4% 4.1%;
-  --sidebar-primary-foreground: 210 20% 98%;
-  --sidebar-accent: 226 50% 10%;
-  --sidebar-accent-foreground: 210 20% 98%;
-  --sidebar-ring: 224 71.4% 4.1%;
+  --card-foreground: 222.2 47.4% 11.2%;
+  --card-border: 214.3 31.8% 91.4%;
+
+  /* Status tints: Received / Posted and Spent / Pending. */
+  --tint-positive: 141 84% 93%;
+  --tint-positive-foreground: 142.1 76.2% 26%;
+  --tint-negative: 0 93.3% 94.1%;
+  --tint-negative-foreground: 0 73.7% 41.8%;
+
+  /* Light sidebar (2026-09-11 SaaS revamp): a soft grey rail with white
+     pill rows for hover/active, rather than the previous dark panel. Set
+     as tokens rather than utility classes on <Sidebar> because the shadcn
+     sidebar paints its header, footer, rail, border and mobile sheet from
+     these variables — overriding only the outer className would leave
+     those sub-parts dark. */
+  --sidebar: 0 0% 100%;
+  --sidebar-foreground: 222.2 47.4% 11.2%;
+  --sidebar-border: 214.3 31.8% 91.4%;
+  --sidebar-primary: 210 40% 96.1%;
+  --sidebar-primary-foreground: 222.2 47.4% 11.2%;
+  --sidebar-accent: 210 40% 96.1%;
+  --sidebar-accent-foreground: 222.2 47.4% 11.2%;
+  --sidebar-ring: 212.7 26.8% 83.9%;
 
   --popover: 0 0% 100%;
-  --popover-foreground: 224 71.4% 4.1%;
-  --popover-border: 220 13% 91%;
+  --popover-foreground: 222.2 47.4% 11.2%;
+  --popover-border: 214.3 31.8% 91.4%;
 
-  --primary: 224 71.4% 4.1%;
-  --primary-foreground: 210 20% 98%;
+  --primary: 222.2 47.4% 11.2%;
+  --primary-foreground: 210 40% 98%;
 
-  --secondary: 220 14.3% 95.9%;
-  --secondary-foreground: 220.9 39.3% 11%;
+  --secondary: 210 40% 96.1%;
+  --secondary-foreground: 222.2 47.4% 11.2%;
 
-  --muted: 220 14.3% 95.9%;
-  --muted-foreground: 220 8.9% 46.1%;
+  --muted: 210 40% 96.1%;
+  --muted-foreground: 215.4 16.3% 46.9%;
 
-  --accent: 220 14.3% 95.9%;
-  --accent-foreground: 220.9 39.3% 11%;
+  --accent: 210 40% 96.1%;
+  --accent-foreground: 222.2 47.4% 11.2%;
 
-  --destructive: 0 84.2% 60.2%;
-  --destructive-foreground: 210 20% 98%;
+  --destructive: 0 72.2% 50.6%;
+  --destructive-foreground: 210 40% 98%;
 
-  --input: 220 13% 91%;
-  --ring: 224 71.4% 4.1%;
+  --input: 212.7 26.8% 83.9%;
+  --ring: 215 20.2% 65.1%;
 
   --chart-1: 173 58% 39%;
   --chart-2: 217 91% 60%;
@@ -121,15 +140,16 @@
   --chart-4: 32 98% 54%;
   --chart-5: 288 85% 61%;
 
-  --app-font-sans: 'Inter', system-ui, sans-serif;
+  --app-font-sans: 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif;
   --app-font-serif: Georgia, serif;
   --app-font-mono: 'JetBrains Mono', 'Menlo', monospace;
-  
-  --radius: 0.25rem;
 
-  --shadow-2xs: 0px 1px 0px 0px rgba(0,0,0,0.05);
-  --shadow-xs: 0px 1px 2px 0px rgba(0,0,0,0.05);
-  --shadow-sm: 0px 2px 4px 0px rgba(0,0,0,0.05);
+  /* 8px cards (rounded-lg), 6px controls (rounded-md), 4px (rounded-sm). */
+  --radius: 0.5rem;
+
+  --shadow-2xs: 0px 1px 0px 0px rgba(15,23,42,0.04);
+  --shadow-xs: 0px 1px 2px 0px rgba(15,23,42,0.05);
+  --shadow-sm: 0px 1px 2px 0px rgba(15,23,42,0.06), 0px 1px 3px 0px rgba(15,23,42,0.04);
   --shadow: 0px 4px 6px -1px rgba(0,0,0,0.1), 0px 2px 4px -1px rgba(0,0,0,0.06);
   --shadow-md: 0px 10px 15px -3px rgba(0,0,0,0.1), 0px 4px 6px -2px rgba(0,0,0,0.05);
   --shadow-lg: 0px 20px 25px -5px rgba(0,0,0,0.1), 0px 10px 10px -5px rgba(0,0,0,0.04);
@@ -199,6 +219,11 @@
   --chart-3: 12 76% 61%;
   --chart-4: 32 98% 54%;
   --chart-5: 288 85% 61%;
+
+  --tint-positive: 142 50% 18%;
+  --tint-positive-foreground: 141 79% 85%;
+  --tint-negative: 0 50% 20%;
+  --tint-negative-foreground: 0 93% 90%;
 }
 
 @layer base {

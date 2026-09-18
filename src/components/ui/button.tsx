@@ -4,26 +4,22 @@ import { cn } from '@/lib/utils';
 import { cva, type VariantProps } from 'class-variance-authority';
 
 const buttonVariants = cva(
-  'inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0' +
+  'inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-all duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40 focus-visible:ring-offset-1 disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg:not([class*=size-])]:size-4 [&_svg]:shrink-0' +
     ' hover-elevate active-elevate-2',
   {
     variants: {
       variant: {
+        // Navy primary (#0F172A → #1E293B on hover).
         default:
-          // @replit: no hover, and add primary border
-          'bg-primary text-primary-foreground border border-primary-border',
+          'bg-primary text-primary-foreground border border-primary shadow-sm hover:bg-[#1E293B] active:shadow-none',
         destructive:
-          'bg-destructive text-destructive-foreground shadow-sm border-destructive-border',
+          'bg-destructive text-destructive-foreground shadow-sm border border-destructive hover:bg-destructive/90',
+        // Crisp white control with a slate-300 border.
         outline:
-          // @replit Shows the background color of whatever card / sidebar / accent background it is inside of.
-          // Inherits the current text color. Uses shadow-xs. no shadow on active
-          // No hover state
-          ' border [border-color:var(--button-outline)] shadow-xs active:shadow-none ',
+          'border border-input bg-card text-foreground shadow-sm hover:bg-background hover:border-ring/60 active:shadow-none',
         secondary:
-          // @replit border, no hover, no shadow, secondary border.
-          'border bg-secondary text-secondary-foreground border border-secondary-border ',
-        // @replit no hover, transparent border
-        ghost: 'border border-transparent',
+          'border border-border bg-secondary text-secondary-foreground hover:bg-border/60',
+        ghost: 'border border-transparent hover:bg-muted',
         link: 'text-primary underline-offset-4 hover:underline',
       },
       size: {

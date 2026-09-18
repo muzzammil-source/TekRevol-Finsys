@@ -2,13 +2,127 @@ import { useQuery, useMutation } from '@tanstack/react-query';
 
 const BASE = '/api';
 
+export type ApiError = Error & { status?: number; code?: string };
+
+// Fired when the server says the session is gone (401) or a temporary
+// password must be changed first — the AuthProvider listens and re-checks
+// who is signed in, which swaps the app for the sign-in screen.
+export const AUTH_EVENT = 'finsys:auth-changed';
+
 async function apiFetch(path: string, opts?: RequestInit) {
-  const res = await fetch(`${BASE}${path}`, opts);
+  // Same-origin session cookie (httpOnly) — sent explicitly for clarity.
+  const res = await fetch(`${BASE}${path}`, { credentials: 'same-origin', ...opts });
   if (!res.ok) {
     const text = await res.text().catch(() => 'Unknown error');
-    throw new Error(`API ${path}: ${res.status} ${text}`);
+    // Server routes answer errors as { error: "human-readable reason" };
+    // surface that sentence (it's written for the user) instead of the raw
+    // JSON body. Anything else keeps the old diagnostic format.
+    let reason: string | undefined;
+    let code: string | undefined;
+    try {
+      const parsed = JSON.parse(text);
+      // Most routes answer { error }; the Plaid routes answer { message,
+      // errorCode } (Plaid's own wording and code) — surface either.
+      if (parsed && typeof parsed.error === 'string') reason = parsed.error;
+      else if (parsed && typeof parsed.message === 'string') reason = parsed.message;
+      if (parsed && typeof parsed.code === 'string') code = parsed.code;
+      else if (parsed && typeof parsed.errorCode === 'string') code = parsed.errorCode;
+    } catch { /* not JSON */ }
+    const error = new Error(reason ?? `API ${path}: ${res.status} ${text}`) as ApiError;
+    error.status = res.status;
+    error.code = code;
+    if (typeof window !== 'undefined' && !path.startsWith('/auth/') && (res.status === 401 || code === 'PASSWORD_CHANGE_REQUIRED')) {
+      window.dispatchEvent(new Event(AUTH_EVENT));
+    }
+    throw error;
   }
   return res.json();
+}
+
+// ===== AUTH & USERS (RBAC, 2026-09-17) =====
+export type Role = 'Admin' | 'Manager' | 'Bookkeeper' | 'Auditor';
+export type Capability = 'read' | 'stage' | 'import' | 'contacts.write' | 'post' | 'coa.write' | 'admin';
+export type AppUser = {
+  id: number;
+  fullName: string;
+  email: string;
+  role: Role;
+  status: 'Active' | 'Disabled';
+  allEntities: boolean;
+  entityIds: number[];
+  mustChangePassword: boolean;
+  lastLoginAt: string | null;
+  createdAt: string;
+};
+
+export function useAuthStatus() {
+  return useQuery<{ needsSetup: boolean }>({ queryKey: ['auth', 'status'], queryFn: () => apiFetch('/auth/status'), retry: false });
+}
+
+/** Resolves to null when not signed in (401), instead of erroring. */
+export function useMe() {
+  return useQuery<{ user: AppUser; capabilities: Capability[] } | null>({
+    queryKey: ['auth', 'me'],
+    queryFn: async () => {
+      try {
+        return await apiFetch('/auth/me');
+      } catch (err) {
+        if ((err as ApiError).status === 401) return null;
+        throw err;
+      }
+    },
+    retry: false,
+    staleTime: 60_000,
+  });
+}
+
+const jsonPost = (path: string, body?: unknown, method = 'POST') =>
+  apiFetch(path, { method, headers: { 'Content-Type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body) });
+
+export function useLogin() {
+  return useMutation({ mutationFn: (data: { email: string; password: string }) => jsonPost('/auth/login', data) });
+}
+export function useBootstrapAdmin() {
+  return useMutation({ mutationFn: (data: { fullName: string; email: string; password: string }) => jsonPost('/auth/bootstrap', data) });
+}
+export function useLogout() {
+  return useMutation({ mutationFn: () => jsonPost('/auth/logout') });
+}
+export function useChangePassword() {
+  return useMutation({ mutationFn: (data: { currentPassword: string; newPassword: string }) => jsonPost('/auth/change-password', data) });
+}
+
+export const getListUsersQueryKey = () => ['users'];
+export function useListUsers(opts?: QueryOpts) {
+  return useQuery<AppUser[]>({ queryKey: getListUsersQueryKey(), queryFn: () => apiFetch('/users'), enabled: opts?.query?.enabled ?? true });
+}
+export function useCreateUser() {
+  return useMutation({
+    mutationFn: (data: { fullName: string; email: string; password: string; role: Role; allEntities: boolean; entityIds: number[] }) => jsonPost('/users', data) as Promise<AppUser>,
+  });
+}
+export function useUpdateUser() {
+  return useMutation({
+    mutationFn: ({ id, ...data }: { id: number; fullName?: string; email?: string; role?: Role; allEntities?: boolean; entityIds?: number[]; status?: 'Active' | 'Disabled' }) =>
+      jsonPost(`/users/${id}`, data, 'PUT') as Promise<AppUser>,
+  });
+}
+export function useResetUserPassword() {
+  return useMutation({ mutationFn: ({ id, password }: { id: number; password: string }) => jsonPost(`/users/${id}/reset-password`, { password }) as Promise<AppUser> });
+}
+
+// Save for review: a Bookkeeper's categorization, stored on the pending
+// transaction for a Manager/Admin to post. `clear: true` discards it.
+export type StagedCategorization = {
+  accountId?: number | null;
+  chargedToEntityId?: number | null;
+  contactId?: number | null;
+  splits?: { accountId: number | null; entityId: number | null; contactId: number | null; amount: number | null }[] | null;
+};
+export function useStageBankTransaction() {
+  return useMutation({
+    mutationFn: ({ id, ...data }: { id: number; clear?: boolean } & StagedCategorization) => jsonPost(`/bank-transactions/${id}/stage`, data, 'PUT'),
+  });
 }
 
 function qs(params: Record<string, any>) {
@@ -66,108 +180,139 @@ export function useBulkDeleteAccounts() {
   });
 }
 
-// ===== DEPARTMENTS =====
-export const getListDepartmentsQueryKey = () => ['departments'];
-
-export function useListDepartments(opts?: QueryOpts) {
+export function useListAccountBalances(params?: { asOfDate?: string; currency?: string; entityId?: number }, opts?: QueryOpts) {
   return useQuery({
-    queryKey: opts?.query?.queryKey ?? getListDepartmentsQueryKey(),
-    queryFn: () => apiFetch('/departments'),
+    queryKey: opts?.query?.queryKey ?? ['account-balances', params],
+    queryFn: () => apiFetch(`/accounts/balances${qs(params ?? {})}`),
   });
 }
 
-export function useCreateDepartment() {
-  return useMutation({
-    mutationFn: ({ name }: { name: string }) =>
-      apiFetch('/departments', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }) }),
-  });
-}
-
-// ===== REVENUE =====
-export const getListRevenueQueryKey = (params?: any) => ['revenue', params];
-
-export function useListRevenue(params?: { month?: string }, opts?: QueryOpts) {
+export function useAccountRegister(accountId: number | null, opts?: QueryOpts, entityId?: number) {
   return useQuery({
-    queryKey: opts?.query?.queryKey ?? getListRevenueQueryKey(params),
-    queryFn: () => apiFetch(`/revenue${qs(params ?? {})}`),
+    queryKey: opts?.query?.queryKey ?? ['account-register', accountId, entityId ?? null],
+    queryFn: () => apiFetch(`/accounts/${accountId}/register${qs({ entityId })}`),
+    enabled: (opts?.query?.enabled ?? true) && !!accountId,
   });
 }
 
-export function useCreateRevenue() {
-  return useMutation({
-    mutationFn: ({ data }: { data: any }) =>
-      apiFetch('/revenue', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) }),
+// ===== CONTACTS (Customer / Vendor sub-ledger) =====
+export type ContactType = 'Customer' | 'Vendor';
+export type Contact = {
+  id: number;
+  name: string;
+  contactType: ContactType;
+  entityId: number | null;
+  email: string;
+  /** Customers only ('' for vendors). */
+  projectName: string;
+  isActive: number;
+  receivedUSD: number;
+  paidUSD: number;
+  /** Current Balance: open AR (customer) / AP (vendor) position, USD. */
+  /** Running balance over every tagged posted line: Customer Dr−Cr, Vendor Cr−Dr. */
+  outstandingUSD: number;
+  /** The subset on Receivables / Payables heads — ties to the AR/AP control account. */
+  openArApUSD: number;
+  postedLineCount: number;
+  lastActivityDate: string | null;
+  /** Read back from the opening-balance journal entry (native currency). */
+  openingBalance: number | null;
+  openingBalanceCurrency: string | null;
+  openingBalanceDate: string | null;
+  openingBalanceEntryId: number | null;
+};
+
+export type SubledgerItem = { contactId: number | null; contactName: string; contactType: ContactType | null; balanceUSD: number; lineCount: number; lastActivityDate: string };
+export type Subledger = {
+  account: { id: number; code: string; name: string; type: string; category: string };
+  entityId: number | null;
+  asOfDate: string;
+  items: SubledgerItem[];
+  controlBalanceUSD: number;
+  itemsTotalUSD: number;
+  reconciles: boolean;
+};
+
+// AR / AP control account broken down by customer / vendor (drill-down).
+export function useSubledger(params: { accountId: number | null; entityId?: number; asOfDate?: string }) {
+  return useQuery<Subledger>({
+    queryKey: ['subledger', params],
+    queryFn: () => apiFetch(`/reports/subledger${qs(params)}`),
+    enabled: !!params.accountId,
   });
 }
 
-export function useUpdateRevenue() {
-  return useMutation({
-    mutationFn: ({ id, data }: { id: number; data: any }) =>
-      apiFetch(`/revenue/${id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) }),
+// Prefix key (no undefined tail) so invalidating ['contacts'] refreshes every
+// filtered list and ledger.
+export const getListContactsQueryKey = (params?: { entityId?: number; type?: ContactType; includeInactive?: boolean }) =>
+  params ? ['contacts', params] : ['contacts'];
+
+export function useListContacts(params?: { entityId?: number; type?: ContactType; includeInactive?: boolean }, opts?: QueryOpts) {
+  return useQuery<Contact[]>({
+    queryKey: opts?.query?.queryKey ?? getListContactsQueryKey(params),
+    queryFn: () => apiFetch(`/contacts${qs({ ...(params ?? {}), includeInactive: params?.includeInactive ? 'true' : undefined })}`),
+    enabled: opts?.query?.enabled ?? true,
   });
 }
 
-export function useDeleteRevenue() {
-  return useMutation({
-    mutationFn: ({ id }: { id: number }) => apiFetch(`/revenue/${id}`, { method: 'DELETE' }),
-  });
+export type ContactLedgerLine = {
+  lineId: number;
+  journalEntryId: number;
+  entryNumber: string;
+  transactionDate: string;
+  entityId: number;
+  entityName: string | null;
+  accountCode: string;
+  accountName: string;
+  accountCategory: string;
+  debit: number;
+  credit: number;
+  currency: string;
+  exchangeRate: number;
+  debitUSD: number;
+  creditUSD: number;
+  description: string;
+  /** Line on a Receivables (customer) / Payables (vendor) account — moves the balance. */
+  /** Kept for older clients — every tagged line now moves the balance. */
+  affectsBalance: boolean;
+  /** This line sits on a Receivables / Payables head (the open A/R–A/P subset). */
+  onArAp: boolean;
+  /** Signed movement this line applied to the running balance, in USD. */
+  deltaUSD: number;
+  runningBalanceUSD: number;
+};
+export type ContactLedger = { contact: Contact; lines: ContactLedgerLine[] };
+
+/** Non-hook fetch for one-off work such as exporting many ledgers at once. */
+export function fetchContactLedger(contactId: number): Promise<ContactLedger> {
+  return apiFetch(`/contacts/${contactId}/ledger`);
 }
 
-export function useBulkImportRevenue() {
-  return useMutation({
-    mutationFn: ({ rows }: { rows: any[] }) =>
-      apiFetch('/revenue/bulk', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(rows) }),
-  });
-}
-
-export function useBulkDeleteRevenue() {
-  return useMutation({
-    mutationFn: ({ ids }: { ids: number[] }) =>
-      apiFetch('/revenue/bulk-delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ids }) }),
-  });
-}
-
-// ===== EXPENSES =====
-export const getListExpensesQueryKey = (params?: any) => ['expenses', params];
-
-export function useListExpenses(params?: { month?: string }, opts?: QueryOpts) {
+export function useContactLedger(contactId: number | null) {
   return useQuery({
-    queryKey: opts?.query?.queryKey ?? getListExpensesQueryKey(params),
-    queryFn: () => apiFetch(`/expenses${qs(params ?? {})}`),
+    queryKey: ['contacts', 'ledger', contactId],
+    queryFn: () => apiFetch(`/contacts/${contactId}/ledger`),
+    enabled: !!contactId,
   });
 }
 
-export function useCreateExpense() {
+export function useCreateContact() {
   return useMutation({
-    mutationFn: ({ data }: { data: any }) =>
-      apiFetch('/expenses', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) }),
+    mutationFn: (data: { name: string; contactType: ContactType; entityId: number | null; email?: string; projectName?: string; openingBalance?: number; openingBalanceDate?: string }) =>
+      apiFetch('/contacts',{ method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) }) as Promise<Contact>,
   });
 }
 
-export function useUpdateExpense() {
+export function useUpdateContact() {
   return useMutation({
-    mutationFn: ({ id, data }: { id: number; data: any }) =>
-      apiFetch(`/expenses/${id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) }),
+    mutationFn: ({ id, ...data }: { id: number; name?: string; contactType?: ContactType; entityId?: number | null; email?: string; projectName?: string; isActive?: boolean; openingBalance?: number; openingBalanceDate?: string }) =>
+      apiFetch(`/contacts/${id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) }) as Promise<Contact>,
   });
 }
 
-export function useDeleteExpense() {
+export function useDeleteContact() {
   return useMutation({
-    mutationFn: ({ id }: { id: number }) => apiFetch(`/expenses/${id}`, { method: 'DELETE' }),
-  });
-}
-
-export function useBulkImportExpenses() {
-  return useMutation({
-    mutationFn: ({ rows }: { rows: any[] }) =>
-      apiFetch('/expenses/bulk', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(rows) }),
-  });
-}
-
-export function useBulkDeleteExpenses() {
-  return useMutation({
-    mutationFn: ({ ids }: { ids: number[] }) =>
-      apiFetch('/expenses/bulk-delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ids }) }),
+    mutationFn: ({ id }: { id: number }) => apiFetch(`/contacts/${id}`, { method: 'DELETE' }),
   });
 }
 
@@ -191,36 +336,6 @@ export function useUpsertExchangeRate() {
 export function useDeleteExchangeRate() {
   return useMutation({
     mutationFn: ({ id }: { id: number }) => apiFetch(`/exchange-rates/${id}`, { method: 'DELETE' }),
-  });
-}
-
-// ===== ALLOCATION RULES =====
-export const getListAllocationRulesQueryKey = () => ['allocation-rules'];
-
-export function useListAllocationRules(opts?: QueryOpts) {
-  return useQuery({
-    queryKey: opts?.query?.queryKey ?? getListAllocationRulesQueryKey(),
-    queryFn: () => apiFetch('/allocation-rules'),
-  });
-}
-
-export function useCreateAllocationRule() {
-  return useMutation({
-    mutationFn: ({ data }: { data: any }) =>
-      apiFetch('/allocation-rules', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) }),
-  });
-}
-
-export function useUpdateAllocationRule() {
-  return useMutation({
-    mutationFn: ({ id, data }: { id: number; data: any }) =>
-      apiFetch(`/allocation-rules/${id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) }),
-  });
-}
-
-export function useDeleteAllocationRule() {
-  return useMutation({
-    mutationFn: ({ id }: { id: number }) => apiFetch(`/allocation-rules/${id}`, { method: 'DELETE' }),
   });
 }
 
@@ -254,62 +369,497 @@ export function useDeleteIntercompanyTransaction() {
   });
 }
 
-// ===== DASHBOARD =====
-export function useGetDashboard(params?: { month?: string; brand?: string }, opts?: QueryOpts) {
+// ===== ENTITIES / BRANDS (Phase 1.1 GL — numeric ids, distinct from the
+// string entity codes in src/lib/constants.ts) =====
+export function useListEntities(opts?: QueryOpts) {
   return useQuery({
-    queryKey: opts?.query?.queryKey ?? ['dashboard', params],
-    queryFn: () => apiFetch(`/dashboard${qs(params ?? {})}`),
+    queryKey: opts?.query?.queryKey ?? ['entities'],
+    queryFn: () => apiFetch('/entities'),
   });
 }
 
-export function useGetMonthlyTrend(opts?: QueryOpts) {
-  return useQuery({
-    queryKey: opts?.query?.queryKey ?? ['monthly-trend'],
-    queryFn: () => apiFetch('/monthly-trend'),
+export const getListEntitiesQueryKey = () => ['entities'];
+
+export function useCreateEntity() {
+  return useMutation({
+    mutationFn: ({ data }: { data: any }) =>
+      apiFetch('/entities', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) }),
   });
 }
 
-// ===== REPORTS =====
-export function useGetBrandPL(params?: { entity?: string; month?: string }, opts?: QueryOpts) {
-  return useQuery({
-    queryKey: opts?.query?.queryKey ?? ['brand-pl', params],
-    queryFn: () => apiFetch(`/brand-pl${qs(params ?? {})}`),
-    enabled: !!params?.entity,
+export function useUpdateEntity() {
+  return useMutation({
+    mutationFn: ({ id, data }: { id: number; data: any }) =>
+      apiFetch(`/entities/${id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) }),
   });
 }
 
-export function useGetConsolidatedPL(params?: { month?: string }, opts?: QueryOpts) {
-  return useQuery({
-    queryKey: opts?.query?.queryKey ?? ['consolidated-pl', params],
-    queryFn: () => apiFetch(`/consolidated-pl${qs(params ?? {})}`),
+export function useDeleteEntity() {
+  return useMutation({
+    mutationFn: ({ id }: { id: number }) => apiFetch(`/entities/${id}`, { method: 'DELETE' }),
   });
 }
 
-export function useGetMonthlyPL(params?: { year?: string; brand?: string }, opts?: QueryOpts) {
+export function useListBrands(params?: { entityId?: number }, opts?: QueryOpts) {
   return useQuery({
-    queryKey: opts?.query?.queryKey ?? ['monthly-pl', params],
-    queryFn: () => apiFetch(`/monthly-pl${qs(params ?? {})}`),
+    queryKey: opts?.query?.queryKey ?? ['brands', params],
+    queryFn: () => apiFetch(`/brands${qs(params ?? {})}`),
   });
 }
 
-export function useGetAllocationReport(params?: { month?: string }, opts?: QueryOpts) {
+// ===== JOURNAL ENTRIES (read-only GL drill-down) =====
+// ---- Split rules (reusable multi-entity percentage templates) ----
+export type SplitRuleLine = { id: number; ruleId: number; entityId: number; entityName: string; percent: number; sortOrder: number };
+export type SplitRule = { id: number; name: string; description: string; isActive: number; createdAt: string; lines: SplitRuleLine[] };
+
+export const getListSplitRulesQueryKey = () => ['split-rules'];
+
+export function useListSplitRules(opts?: QueryOpts) {
   return useQuery({
-    queryKey: opts?.query?.queryKey ?? ['allocation', params],
-    queryFn: () => apiFetch(`/allocation${qs(params ?? {})}`),
+    queryKey: opts?.query?.queryKey ?? getListSplitRulesQueryKey(),
+    queryFn: () => apiFetch('/split-rules') as Promise<SplitRule[]>,
   });
 }
 
-export function useGetBankSpending(params?: { month?: string }, opts?: QueryOpts) {
-  return useQuery({
-    queryKey: opts?.query?.queryKey ?? ['bank-spending', params],
-    queryFn: () => apiFetch(`/bank-spending${qs(params ?? {})}`),
+type SplitRuleInput = { name: string; description?: string; lines: { entityId: number; percent: number }[] };
+
+export function useCreateSplitRule() {
+  return useMutation({
+    mutationFn: (data: SplitRuleInput) =>
+      apiFetch('/split-rules', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) }) as Promise<SplitRule>,
   });
 }
 
-export function useGetIntercompany(params?: { month?: string }, opts?: QueryOpts) {
+export function useUpdateSplitRule() {
+  return useMutation({
+    mutationFn: ({ id, ...data }: Partial<SplitRuleInput> & { id: number; isActive?: boolean }) =>
+      apiFetch(`/split-rules/${id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) }) as Promise<SplitRule>,
+  });
+}
+
+export function useDeleteSplitRule() {
+  return useMutation({
+    mutationFn: ({ id }: { id: number }) => apiFetch(`/split-rules/${id}`, { method: 'DELETE' }),
+  });
+}
+
+export type ResolvedRate = { currency: string; date: string; period: string; rate: number; found: boolean; source: string; effectiveMonth?: string };
+
+/** Non-hook lookup, for forms that resolve a rate per line as currencies change. */
+export function fetchExchangeRate(currency: string, date: string): Promise<ResolvedRate> {
+  return apiFetch(`/exchange-rates/resolve${qs({ currency, date })}`) as Promise<ResolvedRate>;
+}
+
+/** The rate a posting would use for this currency on this date (pre-fills the JE form). */
+export function useResolveExchangeRate(currency: string, date: string, opts?: QueryOpts) {
   return useQuery({
-    queryKey: opts?.query?.queryKey ?? ['intercompany', params],
-    queryFn: () => apiFetch(`/intercompany${qs(params ?? {})}`),
+    queryKey: opts?.query?.queryKey ?? ['exchange-rate-resolve', currency, date],
+    queryFn: () => apiFetch(`/exchange-rates/resolve${qs({ currency, date })}`) as Promise<ResolvedRate>,
+    enabled: (opts?.query?.enabled ?? true) && !!currency && !!date,
+  });
+}
+
+/** Manual journal entry — posts one balanced entry per entity on the sheet. */
+export function useCreateJournalEntry() {
+  return useMutation({
+    mutationFn: (data: {
+      transactionDate: string;
+      reference?: string;
+      description?: string;
+      /** `debit`/`credit` are NATIVE amounts in `currency`; balancing is on the converted USD. */
+      lines: { accountId: number; entityId: number; debit: number; credit: number; description?: string; currency?: string; exchangeRate?: number }[];
+    }) => apiFetch('/journal-entries', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) }) as Promise<{ ok: boolean; journalEntries: any[]; entryNumbers: string[] }>,
+  });
+}
+
+export function useListJournalEntries(params?: { entityId?: number; brandId?: number; status?: string }, opts?: QueryOpts) {
+  return useQuery({
+    queryKey: opts?.query?.queryKey ?? ['journal-entries', params],
+    queryFn: () => apiFetch(`/journal-entries${qs(params ?? {})}`),
+  });
+}
+
+// ===== BANK ACCOUNTS (Phase 1.2 GL staging — distinct from the legacy
+// /plaid/* connections below) =====
+// Called with no args this is a PREFIX (['bank-accounts']), so the existing
+// `invalidateQueries({ queryKey: getListBankAccountsQueryKey() })` calls keep
+// matching every variant of the query — including the currency-scoped ones
+// the Bank Hub's Global Currency Switcher creates (2026-09-11). A literal
+// ['bank-accounts', undefined] would NOT partial-match ['bank-accounts',
+// { currency: 'AED' }], so those invalidations would silently stop working.
+export const getListBankAccountsQueryKey = (params?: any) =>
+  params === undefined ? ['bank-accounts'] : ['bank-accounts', params];
+
+export function useListBankAccounts(params?: { entityId?: number; currency?: string }, opts?: QueryOpts) {
+  return useQuery({
+    queryKey: opts?.query?.queryKey ?? getListBankAccountsQueryKey(params),
+    queryFn: () => apiFetch(`/bank-accounts${qs(params ?? {})}`),
+  });
+}
+
+// COA-driven Banking Hub (2026-09-11): the card list comes from the Chart
+// of Accounts, not from bank_accounts. Shares the ['bank-accounts'] key
+// prefix so the hub's existing invalidations refresh the cards too.
+export function useBankingCards(params?: { currency?: string; entityId?: number }, opts?: QueryOpts) {
+  return useQuery({
+    queryKey: opts?.query?.queryKey ?? ['bank-accounts', 'cards', params],
+    queryFn: () => apiFetch(`/banking/cards${qs(params ?? {})}`),
+  });
+}
+
+export function useEnsureBankFeed() {
+  return useMutation({
+    mutationFn: ({ accountId, entityId }: { accountId: number; entityId?: number }) =>
+      apiFetch('/banking/feeds', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ accountId, entityId }),
+      }),
+  });
+}
+
+export function useCreateBankAccount() {
+  return useMutation({
+    mutationFn: ({ data }: { data: any }) =>
+      apiFetch('/bank-accounts', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) }),
+  });
+}
+
+/** Rename or re-assign a bank feed (the server refuses to move one that has posted lines). */
+export function useUpdateBankAccount() {
+  return useMutation({
+    mutationFn: ({ id, data }: { id: number; data: any }) =>
+      apiFetch(`/bank-accounts/${id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) }),
+  });
+}
+
+export function useRefreshBankAccountBalance() {
+  return useMutation({
+    mutationFn: ({ bankAccountId }: { bankAccountId: number }) =>
+      apiFetch(`/bank-accounts/${bankAccountId}/refresh-balance`, { method: 'POST' }),
+  });
+}
+
+// ===== BANK TRANSACTIONS (Phase 1.2/1.3 GL staging + posting engine) =====
+// Bare call returns a PREFIX so `invalidateQueries` matches every
+// parameterised variant. `['bank-transactions', undefined]` would NOT
+// partial-match `['bank-transactions', { bankAccountId: 1 }]`, so once the
+// Banking Hub started scoping these queries by bank account, posting would
+// have silently stopped refreshing the visible list.
+export const getListBankTransactionsQueryKey = (params?: any) =>
+  params === undefined ? ['bank-transactions'] : ['bank-transactions', params];
+
+// `enabled` is forwarded so a caller can hold the query until it knows
+// which bank account to scope to — without it the hook fired once
+// unscoped and then again scoped, briefly showing every account's
+// transactions. The queryKey already carries `params`, so changing the
+// bank account refetches on its own; no manual dependency array needed.
+export function useListBankTransactions(params?: { bankAccountId?: number; status?: string }, opts?: QueryOpts) {
+  return useQuery({
+    queryKey: opts?.query?.queryKey ?? getListBankTransactionsQueryKey(params),
+    queryFn: () => apiFetch(`/bank-transactions${qs(params ?? {})}`),
+    enabled: opts?.query?.enabled ?? true,
+  });
+}
+
+export const getUnpostedBankTransactionsQueryKey = (params?: any) =>
+  params === undefined ? ['bank-transactions-unposted'] : ['bank-transactions-unposted', params];
+
+export function useUnpostedBankTransactions(params?: { bankAccountId?: number }, opts?: QueryOpts) {
+  return useQuery({
+    queryKey: opts?.query?.queryKey ?? getUnpostedBankTransactionsQueryKey(params),
+    queryFn: () => apiFetch(`/bank-transactions/unposted${qs(params ?? {})}`),
+    enabled: opts?.query?.enabled ?? true,
+  });
+}
+
+export function useUnpostBankTransaction() {
+  return useMutation({
+    mutationFn: ({ id }: { id: number }) => apiFetch(`/bank-transactions/${id}/unpost`, { method: 'POST' }),
+  });
+}
+
+export function usePostBankTransaction() {
+  return useMutation({
+    mutationFn: ({
+      id,
+      ...data
+    }: { id: number; accountId?: number; entityId?: number; brandId?: number; postingDate?: string; description?: string; reference?: string; chargedToEntityId?: number | null; accountingPeriod?: string | null; contactId?: number | null }) =>
+      apiFetch(`/bank-transactions/${id}/post`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(data),
+      }),
+  });
+}
+
+export type CrossBrandSplitLine = {
+  accountId: number;
+  /** Optional Payee / Contact, validated against the line's charged-to entity. */
+  contactId?: number | null;
+  /** Charged-to entity for the line (brand is derived server-side). */
+  entityId?: number;
+  brandId?: number;
+  percentage?: number;
+  amount?: number;
+  effectiveStartMonth?: string;
+  effectiveEndMonth?: string;
+};
+
+export function usePostBankTransactionSplit() {
+  return useMutation({
+    mutationFn: ({
+      id,
+      ...data
+    }: { id: number; splits: CrossBrandSplitLine[]; postingDate?: string; description?: string; reference?: string }) =>
+      apiFetch(`/bank-transactions/${id}/post-split`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(data),
+      }),
+  });
+}
+
+export function useBulkPostBankTransactions() {
+  return useMutation({
+    mutationFn: ({ items }: { items: { bankTransactionId: number; accountId?: number; entityId?: number; brandId?: number; chargedToEntityId?: number; contactId?: number | null }[] }) =>
+      apiFetch('/bank-transactions/bulk-post', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ items }),
+      }),
+  });
+}
+
+export function useImportBankStatement() {
+  return useMutation({
+    mutationFn: ({ bankAccountId, file, columnMapping }: { bankAccountId: number; file: File; columnMapping?: any }) => {
+      const formData = new FormData();
+      formData.append('statement', file);
+      formData.append('bankAccountId', String(bankAccountId));
+      if (columnMapping) formData.append('columnMapping', JSON.stringify(columnMapping));
+      return apiFetch('/bank-transactions/import', { method: 'POST', body: formData });
+    },
+  });
+}
+
+export function useSyncPlaidBankAccount() {
+  return useMutation({
+    mutationFn: ({ bankAccountId }: { bankAccountId: number }) =>
+      apiFetch('/bank-transactions/plaid-sync', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ bankAccountId }),
+      }),
+  });
+}
+
+// ===== CATEGORIZATION RULES (Phase 1.3) =====
+export function useListCategorizationRules(opts?: QueryOpts) {
+  return useQuery({
+    queryKey: opts?.query?.queryKey ?? ['categorization-rules'],
+    queryFn: () => apiFetch('/categorization-rules'),
+  });
+}
+
+// ===== RECONCILIATION (Phase 1.5) =====
+export const getListReconciliationsQueryKey = (params?: any) => ['reconciliations', params];
+
+export function useListReconciliations(params?: { bankAccountId?: number; status?: string }, opts?: QueryOpts) {
+  return useQuery({
+    queryKey: opts?.query?.queryKey ?? getListReconciliationsQueryKey(params),
+    queryFn: () => apiFetch(`/reconciliations${qs(params ?? {})}`),
+  });
+}
+
+export const getReconciliationQueryKey = (id?: number) => ['reconciliation', id];
+
+export function useGetReconciliation(id?: number, opts?: QueryOpts) {
+  return useQuery({
+    queryKey: opts?.query?.queryKey ?? getReconciliationQueryKey(id),
+    queryFn: () => apiFetch(`/reconciliations/${id}`),
+    enabled: opts?.query?.enabled ?? Boolean(id),
+  });
+}
+
+export function useCreateReconciliation() {
+  return useMutation({
+    mutationFn: ({ data }: { data: any }) =>
+      apiFetch('/reconciliations', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) }),
+  });
+}
+
+export function useAutoMatchReconciliation() {
+  return useMutation({
+    mutationFn: ({ id }: { id: number }) => apiFetch(`/reconciliations/${id}/auto-match`, { method: 'POST' }),
+  });
+}
+
+export function useAddReconciliationMatch() {
+  return useMutation({
+    mutationFn: ({ id, bankTransactionId, journalLineId }: { id: number; bankTransactionId?: number; journalLineId?: number }) =>
+      apiFetch(`/reconciliations/${id}/matches`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ bankTransactionId, journalLineId }),
+      }),
+  });
+}
+
+export function useDeleteReconciliationMatch() {
+  return useMutation({
+    mutationFn: ({ id, matchId }: { id: number; matchId: number }) =>
+      apiFetch(`/reconciliations/${id}/matches/${matchId}`, { method: 'DELETE' }),
+  });
+}
+
+export function useCompleteReconciliation() {
+  return useMutation({
+    mutationFn: ({ id, reconciledBy }: { id: number; reconciledBy?: string }) =>
+      apiFetch(`/reconciliations/${id}/complete`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ reconciledBy }),
+      }),
+  });
+}
+
+export function useReconciliationStatus(
+  params?: { reconciliationId?: number; bankAccountId?: number; statementStartDate?: string; statementEndDate?: string; statementEndingBalance?: number },
+  opts?: QueryOpts,
+) {
+  return useQuery({
+    queryKey: opts?.query?.queryKey ?? ['reconciliation-status', params],
+    queryFn: () => apiFetch(`/reconciliation/status${qs(params ?? {})}`),
+    enabled: opts?.query?.enabled ?? Boolean(params?.reconciliationId || (params?.bankAccountId && params?.statementEndDate)),
+  });
+}
+
+// ===== ACCOUNTING PERIODS (Phase 1.5 period locking) =====
+export function useListAccountingPeriods(params?: { entityId?: number }, opts?: QueryOpts) {
+  return useQuery({
+    queryKey: opts?.query?.queryKey ?? ['accounting-periods', params],
+    queryFn: () => apiFetch(`/accounting-periods${qs(params ?? {})}`),
+  });
+}
+
+export function useLockPeriod() {
+  return useMutation({
+    mutationFn: ({ entityId, periodMonth, lockedBy }: { entityId: number; periodMonth: string; lockedBy?: string }) =>
+      apiFetch('/reconciliation/lock-period', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ entityId, periodMonth, lockedBy }),
+      }),
+  });
+}
+
+// ===== LEGAL FINANCIAL STATEMENTS (Phase 1.6) =====
+export function useIncomeStatement(
+  params: { entityId?: number; brandId?: number; startDate: string; endDate: string; currency?: string },
+  opts?: QueryOpts,
+) {
+  return useQuery({
+    queryKey: opts?.query?.queryKey ?? ['income-statement', params],
+    queryFn: () => apiFetch(`/reports/income-statement${qs(params)}`),
+    enabled: opts?.query?.enabled ?? Boolean(params.startDate && params.endDate),
+  });
+}
+
+export function useBalanceSheet(params: { entityId?: number; asOfDate: string; currency?: string }, opts?: QueryOpts) {
+  return useQuery({
+    queryKey: opts?.query?.queryKey ?? ['balance-sheet', params],
+    queryFn: () => apiFetch(`/reports/balance-sheet${qs(params)}`),
+    enabled: opts?.query?.enabled ?? Boolean(params.asOfDate),
+  });
+}
+
+export function useTrialBalance(params: { entityId?: number; startDate?: string; endDate?: string }, opts?: QueryOpts) {
+  return useQuery({
+    queryKey: opts?.query?.queryKey ?? ['trial-balance', params],
+    queryFn: () => apiFetch(`/reports/trial-balance${qs(params)}`),
+  });
+}
+
+export function useGeneralLedger(
+  params: { entityId?: number; accountId?: number; startDate?: string; endDate?: string },
+  opts?: QueryOpts,
+) {
+  return useQuery({
+    queryKey: opts?.query?.queryKey ?? ['general-ledger', params],
+    queryFn: () => apiFetch(`/reports/general-ledger${qs(params)}`),
+  });
+}
+
+export function useCashFlowStatement(
+  params: { entityId?: number; brandId?: number; startDate: string; endDate: string; currency?: string },
+  opts?: QueryOpts,
+) {
+  return useQuery({
+    queryKey: opts?.query?.queryKey ?? ['cash-flow', params],
+    queryFn: () => apiFetch(`/reports/cash-flow${qs(params)}`),
+    enabled: opts?.query?.enabled ?? Boolean(params.startDate && params.endDate),
+  });
+}
+
+// ===== PHASE 2: GROUPED MANAGEMENT REPORTING (reads posted GL only) =====
+export function useBrandPnl(params: { entityId?: number; startDate: string; endDate: string; currency?: string }, opts?: QueryOpts) {
+  return useQuery({
+    queryKey: opts?.query?.queryKey ?? ['brand-pnl', params],
+    queryFn: () => apiFetch(`/reports/brand-pnl${qs(params)}`),
+    enabled: opts?.query?.enabled ?? Boolean(params.startDate && params.endDate),
+  });
+}
+
+export function useRevenueStreams(
+  params: { entityId?: number; brandId?: number; startDate: string; endDate: string; currency?: string },
+  opts?: QueryOpts,
+) {
+  return useQuery({
+    queryKey: opts?.query?.queryKey ?? ['revenue-streams', params],
+    queryFn: () => apiFetch(`/reports/revenue-streams${qs(params)}`),
+    enabled: opts?.query?.enabled ?? Boolean(params.startDate && params.endDate),
+  });
+}
+
+export function useManagementTrends(
+  params: { entityId?: number; brandId?: number; startDate: string; endDate: string; currency?: string },
+  opts?: QueryOpts,
+) {
+  return useQuery({
+    queryKey: opts?.query?.queryKey ?? ['management-trends', params],
+    queryFn: () => apiFetch(`/reports/trends${qs(params)}`),
+    enabled: opts?.query?.enabled ?? Boolean(params.startDate && params.endDate),
+  });
+}
+
+export function useExecutiveDashboard(params?: { entityId?: number; asOfDate?: string; trailingMonths?: number; currency?: string }, opts?: QueryOpts) {
+  return useQuery({
+    queryKey: opts?.query?.queryKey ?? ['executive-dashboard', params],
+    queryFn: () => apiFetch(`/reports/executive${qs(params ?? {})}`),
+  });
+}
+
+export type CashFlowTrendPoint = { bucket: string; label: string; cashIn: number; cashOut: number; net: number; position: number };
+export type CashFlowTrend = { startDate: string; endDate: string; currency: string; rateFound: boolean; granularity: 'day' | 'month'; openingPosition: number; series: CashFlowTrendPoint[] };
+
+/** Cash in / out / running position per month (or per day for a short range). */
+export function useCashFlowTrend(params: { entityId?: number; startDate: string; endDate: string; currency?: string; granularity?: 'day' | 'month' }, opts?: QueryOpts) {
+  return useQuery({
+    queryKey: opts?.query?.queryKey ?? ['cash-flow-trend', params],
+    queryFn: () => apiFetch(`/reports/cash-flow-trend${qs(params)}`) as Promise<CashFlowTrend>,
+    enabled: (opts?.query?.enabled ?? true) && !!params.startDate && !!params.endDate,
+  });
+}
+
+export type TrendPoint = { month: string; revenue: number; expenses: number; netIncome: number };
+
+/** Monthly revenue / expenses / net income — the dashboard's performance bars. */
+export function useTrends(params: { entityId?: number; brandId?: number; startDate: string; endDate: string; currency?: string }, opts?: QueryOpts) {
+  return useQuery({
+    queryKey: opts?.query?.queryKey ?? ['trends', params],
+    queryFn: () => apiFetch(`/reports/trends${qs(params)}`) as Promise<{ series: TrendPoint[]; currency: string; rateFound: boolean }>,
+    enabled: (opts?.query?.enabled ?? true) && !!params.startDate && !!params.endDate,
   });
 }
 
@@ -332,40 +882,6 @@ export function usePlaidAccounts(opts?: QueryOpts) {
   return useQuery({
     queryKey: opts?.query?.queryKey ?? ['plaid-accounts'],
     queryFn: () => apiFetch('/plaid/accounts'),
-  });
-}
-
-export function usePlaidTransactions(limit = 50, opts?: QueryOpts) {
-  return useQuery({
-    queryKey: opts?.query?.queryKey ?? ['plaid-transactions', limit],
-    queryFn: () => apiFetch(`/plaid/transactions?limit=${limit}`),
-  });
-}
-
-export function usePlaidUnpostedTransactions(itemId?: number) {
-  return useQuery({
-    queryKey: ['plaid-unposted-transactions', itemId],
-    queryFn: () => apiFetch(`/plaid/items/${itemId}/unposted`),
-    enabled: Boolean(itemId),
-  });
-}
-
-export function useUpdatePlaidTransactionReview() {
-  return useMutation({
-    mutationFn: ({
-      itemId,
-      transactionIds,
-      reviewStatus,
-    }: {
-      itemId: number;
-      transactionIds: string[];
-      reviewStatus: 'pending' | 'posted' | 'excluded';
-    }) =>
-      apiFetch(`/plaid/items/${itemId}/transactions/review`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ transactionIds, reviewStatus }),
-      }),
   });
 }
 
@@ -423,13 +939,6 @@ export function useCreateManualPlaidItem() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ institutionName, country, icon }),
       }),
-  });
-}
-
-export function useSyncPlaidItem() {
-  return useMutation({
-    mutationFn: ({ id }: { id: number }) =>
-      apiFetch(`/plaid/items/${id}/sync`, { method: 'POST' }),
   });
 }
 

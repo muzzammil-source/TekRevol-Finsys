@@ -1,12 +1,22 @@
 export const ENTITIES = ['CA', 'TX', 'UAE', 'PK', 'BuzzFlick'];
-export const REVENUE_BRANDS = ['CA', 'TX', 'UAE', 'BuzzFlick'];
 export const CURRENCIES = ['USD', 'PKR', 'AED', 'GBP', 'EUR'];
-export const ALLOCATION_METHODS = ['Direct', 'Percentage', 'Equal Split', 'Manual'];
-export const COST_OWNERS = ['CA', 'TX', 'UAE', 'PK', 'BuzzFlick', 'Shared'];
-export const REVENUE_TYPES = ['Fresh', 'Recurring', 'Upsell'];
-export const ACCOUNT_TYPES = ['expense', 'revenue'];
-export const DEPARTMENTS = ['Engineering', 'Sales', 'Marketing', 'Operations', 'Finance', 'HR', 'Admin', 'Other'];
-export const DASHBOARD_BRANDS = ['All Brands', 'CA', 'TX', 'UAE', 'BuzzFlick'];
+// The 5 fundamental accounting categories the GL posting engine and every
+// report understands. A handful of pre-GL rows still carry the legacy
+// lowercase 'expense'/'revenue' values (a known casing wart, see
+// .claude/PHASE_TRACKER.md) — the Chart of Accounts UI only ever writes
+// these Title-Case values going forward.
+export const ACCOUNT_TYPES = ['Asset', 'Liability', 'Equity', 'Revenue', 'Expense'];
+
+// Suggested sub-types per account type, shown as a datalist in the Chart of
+// Accounts form — free-text underneath (accounts.subType has no CHECK
+// constraint), so a user can type a new one without a schema change.
+export const ACCOUNT_SUBTYPES: Record<string, string[]> = {
+  Asset: ['Bank', 'Current Assets', 'Fixed Assets', 'Receivables', 'Intercompany Clearing'],
+  Liability: ['Accounts Payable', 'Accrued Liabilities', 'Intercompany Clearing'],
+  Equity: ['Equity'],
+  Revenue: ['Operating Revenue', 'Other Revenue'],
+  Expense: ['COGS', 'Operating Expense', 'Intercompany Clearing'],
+};
 
 // Display labels for each entity code (internal codes stay stable for backward compatibility
 // with existing data; only the labels shown to users changed per the entity rename request).
@@ -20,23 +30,6 @@ export const ENTITY_LABELS: Record<string, string> = {
 export function entityLabel(code: string): string {
   return ENTITY_LABELS[code] || code;
 }
-
-// Cash Received In (Revenue Entry) — same set of entities as Paid By Entity.
-export const CASH_RECEIVED_IN_OPTIONS = ENTITIES;
-
-// Paid By Entity (Expense Entry) — same set of entities.
-export const PAID_BY_ENTITY_OPTIONS = ENTITIES;
-
-// Entity-specific banks. The Bank dropdown on Expense Entry filters to the list
-// that matches the currently selected "Paid By Entity".
-export const BANKS_BY_ENTITY: Record<string, string[]> = {
-  CA: ['Wells Fargo CA'],
-  TX: ['Chase TX'],
-  UAE: ['Emirates AED', 'Emirates USD'],
-  PK: ['Meezan Bank', 'Bank AL Habib'],
-  BuzzFlick: ['Bank of America (BOA)'],
-};
-export const ALL_BANKS = Object.values(BANKS_BY_ENTITY).flat();
 
 export const MONTH_NAMES = [
   'January', 'February', 'March', 'April', 'May', 'June',

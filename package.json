@@ -77,6 +77,8 @@
     "zod": "catalog:"
   },
   "dependencies": {
+    "jspdf": "2.5.2",
+    "jspdf-autotable": "3.8.4",
     "react-plaid-link": "^5.0.0",
     "xlsx": "^0.18.5"
   },
