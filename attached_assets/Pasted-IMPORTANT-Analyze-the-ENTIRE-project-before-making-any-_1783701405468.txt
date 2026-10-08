@@ -1,0 +1,42 @@
+IMPORTANT: Analyze the ENTIRE project before making any changes.
+
+This is an EXISTING Finance Management System. Do NOT redesign, rebuild, or change the UI/UX. Preserve all business logic, reports, database, pages, calculations, and existing functionality.
+
+Current problem:
+
+The project imports successfully and dependencies install successfully using `pnpm install`.
+
+Running `pnpm dev` manually starts Vite successfully.
+
+However, clicking the Replit Run button starts the wrong application (`mockup-sandbox`) instead of this Finance Management System, causing errors such as:
+
+- vite: command not found
+- Cannot find package 'fast-glob'
+- failed to load config from artifacts/mockup-sandbox/vite.config.ts
+
+Your tasks, in this exact order:
+
+1. Determine why Replit is starting `artifacts/mockup-sandbox` instead of the actual project.
+2. Fix the project/workspace configuration so the Run button starts THIS Finance Management System.
+3. Remove any stale or incorrect workspace references to `mockup-sandbox` if they are no longer required.
+4. Verify that `.replit`, workflows, package.json, workspace configuration, and startup commands all point to the correct project.
+5. Install any missing dependencies if required.
+6. Ensure both frontend and backend start successfully using the Run button.
+7. Verify that Preview works.
+8. Verify that Publishing works.
+9. Do NOT redesign or refactor the application.
+10. Do NOT add new features.
+11. Do NOT modify the database schema unless absolutely necessary.
+12. Do NOT delete existing files unless they are confirmed to be obsolete workspace artifacts that prevent the application from running.
+13. At the end, automatically run the project and verify:
+   - Frontend loads
+   - Backend starts
+   - Dashboard opens
+   - Revenue page opens
+   - Expense page opens
+   - Reports load
+   - No build errors
+   - No runtime errors
+   - Publishing configuration is valid
+
+Do not stop until the project is fully runnable. Finally, provide a summary of every file you modified and explain why each modification was necessary.

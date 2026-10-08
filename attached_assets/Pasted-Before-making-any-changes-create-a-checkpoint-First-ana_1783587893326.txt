@@ -1,0 +1,93 @@
+Before making any changes, create a checkpoint.
+
+First, analyze the entire application, build configuration, publishing configuration, database, reports, and business logic.
+
+IMPORTANT:
+- The application is currently failing during the Build/Publish process.
+- Your FIRST priority is to identify and fix every issue preventing a successful build and deployment.
+- Continue fixing build errors until the application builds and publishes successfully.
+- Do NOT stop after identifying the errors—resolve them completely.
+- Verify that the application can successfully Build, Run, and Publish before implementing any new features.
+
+STRICT REQUIREMENTS
+- Do NOT redesign or rebuild the application.
+- Do NOT change the existing UI/UX unless explicitly requested.
+- Do NOT remove any existing functionality.
+- Preserve all reports, dashboards, calculations, filters, business logic, and database records.
+- Maintain backward compatibility with all existing data.
+- Modify only what is necessary.
+
+After the application builds and publishes successfully, implement the following enhancements:
+
+1. Revenue & Expense Entry Improvements
+- Add bulk row selection using checkboxes.
+- Allow selecting multiple rows simultaneously.
+- Add a "Delete Selected" button to delete all selected rows at once after confirmation.
+- Display the total amount of all selected rows in real time.
+- This functionality should work in both Revenue Entry and Expense Entry.
+
+2. Sorting & Advanced Filtering
+For both Revenue Entry and Expense Entry:
+- Add sorting on every column.
+- Add advanced filters on every column.
+- Allow selecting multiple filter values at the same time.
+- Allow combining multiple filters together.
+- Filters should update instantly without affecting stored data.
+
+3. Global Search
+For both Revenue Entry and Expense Entry:
+- Add a search box.
+- Search should work across all relevant fields.
+- Results should update instantly while typing.
+
+4. Dashboard Brand Filter
+Add a Brand filter on the Dashboard.
+The user should be able to view:
+- All Brands
+- CA
+- TX
+- BuzzFlick
+
+Every dashboard card, chart, KPI, and summary should refresh automatically based on the selected Brand.
+
+5. Expense Department
+In Expense Entry:
+- Add a new field named "Department".
+- Include it in:
+  - Entry Form
+  - Edit
+  - View
+  - Search
+  - Filters
+  - Excel Import Template
+  - Excel Export
+- Update reports only where Department provides meaningful reporting.
+- Do not change existing calculations.
+
+FINAL VERIFICATION
+
+Before completing the task:
+
+1. Fix every Build error.
+2. Verify the application Runs successfully.
+3. Verify the application Publishes successfully.
+4. Verify Revenue Entry works.
+5. Verify Expense Entry works.
+6. Verify Bulk Selection works.
+7. Verify Delete Selected works.
+8. Verify Selected Total calculation works.
+9. Verify Sorting works.
+10. Verify Multi-select Filters work.
+11. Verify Search works.
+12. Verify Dashboard Brand Filter works.
+13. Verify Department field works.
+14. Verify all existing reports still work.
+15. Fix any issues introduced during implementation.
+
+Do not finish until the application builds successfully, publishes successfully, and every requested feature has been fully implemented and tested.
+
+Finally, provide a concise summary of:
+- Build issues fixed.
+- Files modified.
+- Database changes.
+- Features implemented.

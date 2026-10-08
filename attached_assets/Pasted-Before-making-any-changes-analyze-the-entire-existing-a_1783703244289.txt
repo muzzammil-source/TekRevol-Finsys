@@ -1,0 +1,256 @@
+Before making any changes, analyze the entire existing application, database, APIs, reports, business logic, and project structure.
+
+IMPORTANT:
+- This is an EXISTING Finance Management System.
+- Do NOT redesign or rebuild the application.
+- Do NOT change the current UI/UX unless explicitly requested below.
+- Do NOT remove any existing functionality.
+- Preserve all reports, dashboards, calculations, allocation logic, filters, database structure, and business logic.
+- Reuse the existing architecture wherever possible.
+- Keep the application stable.
+- Ensure the project builds successfully, runs successfully, Preview works, and Publishing works after all changes.
+
+Implement ONLY the following improvements.
+
+====================================================
+1. Dashboard Brand Filter
+====================================================
+
+- Add UAE to the Dashboard Brand Filter.
+- UAE should work exactly like CA, TX, and BuzzFlick.
+- Selecting UAE should display only UAE KPIs, charts, revenue, expenses, and dashboard statistics.
+
+====================================================
+2. Revenue & Expense Entry Formatting
+====================================================
+
+Only in Revenue Entry and Expense Entry pages:
+
+- Display all monetary and numeric values with exactly 2 decimal places.
+- Do NOT change formatting in reports, dashboards, or financial statements.
+
+====================================================
+3. Revenue Module
+====================================================
+
+Maintain and improve the Revenue module.
+
+Revenue Type should include:
+
+- Fresh
+- Recurring
+- Upsell
+
+Business Logic:
+
+- New client's first payment = Fresh.
+- Future payments from the same client/project = Recurring.
+- Additional sales to existing clients = Upsell.
+
+Ensure these values automatically flow into:
+
+- Dashboard
+- Revenue Reports
+- Consolidated P&L
+
+====================================================
+4. Chart of Accounts Improvements
+====================================================
+
+Implement:
+
+- Bulk Import from Excel.
+- Bulk Export to Excel.
+- Downloadable Excel Template.
+- Import validation.
+- Skip invalid rows.
+- User-friendly validation errors.
+- Import summary displaying:
+  - Total Rows
+  - Successfully Imported
+  - Failed Rows
+  - Error Details
+
+====================================================
+5. Chart of Accounts Grid Improvements
+====================================================
+
+Add:
+
+- Row selection using checkboxes.
+- Select All.
+- Bulk Delete.
+- Confirmation before deletion.
+- Search box.
+- Search by:
+  - Account Name
+  - Account Code
+  - Account Category
+
+====================================================
+6. Expense Entry Simplification
+====================================================
+
+Simplify the Expense Entry module.
+
+Remove the Expense Head field completely from:
+
+- Expense Entry Form
+- Expense Entry Grid
+- Add/Edit Expense
+- Expense Import Template
+- Expense Export Template
+
+Keep only:
+
+- Expense Name
+- Expense Category
+
+Every expense must belong to exactly one Expense Category.
+
+====================================================
+7. Expense Category Integration
+====================================================
+
+Use the Chart of Accounts as the master list of Expense Categories.
+
+Expense Entry should allow selecting only categories maintained in Chart of Accounts.
+
+Whenever a category is added or edited in Chart of Accounts, it should automatically become available in Expense Entry.
+
+No manual mapping.
+
+====================================================
+8. Expense Import & Export Templates
+====================================================
+
+Update all Expense templates.
+
+Remove:
+
+- Expense Head
+
+Replace with:
+
+- Expense Category
+
+Validate imported categories.
+
+Display meaningful validation errors.
+
+====================================================
+9. Department Management
+====================================================
+
+Improve the Department field in Expense Entry.
+
+Requirements:
+
+- Department should be a searchable dropdown.
+- Users should be able to create a new Department directly while adding/editing an expense.
+- Newly created Departments should automatically become available for future entries.
+- Prevent duplicate Departments.
+- Departments should remain available permanently.
+- Include Department in the Expense Import Template.
+- During Excel import:
+  - Automatically recognize existing Departments.
+  - Create new Departments if they do not exist.
+- Departments should be available for future reporting and filtering.
+
+====================================================
+10. Consolidated P&L Enhancement
+====================================================
+
+Keep the existing report layout.
+
+Under Revenue display:
+
+Revenue
+   Fresh Revenue
+   Recurring Revenue
+   Upsell Revenue
+----------------------------
+Total Revenue
+
+The total must equal Total Revenue.
+
+Under Expenses display:
+
+Expenses
+   Salaries
+   Software & Subscriptions
+   Rent
+   Utilities
+   Marketing
+   Office Expenses
+   Professional Fees
+   Travel
+   Miscellaneous
+   (all existing categories)
+----------------------------
+Total Expenses
+
+Expense breakdown should be generated automatically using Expense Category.
+
+No manual mapping.
+
+====================================================
+11. Data Integrity
+====================================================
+
+Do NOT lose existing data.
+
+Automatically migrate existing Expense Head values into Expense Category where possible.
+
+Preserve:
+
+- Historical data
+- Reports
+- Dashboards
+- Allocations
+- Calculations
+
+====================================================
+12. General Quality
+====================================================
+
+- Maintain responsive design.
+- Match the current UI style.
+- Do not introduce duplicate fields.
+- Keep database normalized.
+- Ensure all new features integrate with existing reports.
+
+====================================================
+13. Final Verification
+====================================================
+
+Before completing the task:
+
+- Build the application.
+- Run the application.
+- Verify Frontend starts successfully.
+- Verify Backend starts successfully.
+- Verify Preview works.
+- Verify Publishing works.
+- Verify Dashboard works.
+- Verify UAE Brand Filter.
+- Verify Revenue Entry.
+- Verify Expense Entry.
+- Verify Department creation.
+- Verify Chart of Accounts Import.
+- Verify Chart of Accounts Export.
+- Verify Download Template.
+- Verify Search.
+- Verify Bulk Delete.
+- Verify Expense Category integration.
+- Verify Revenue Type (Fresh/Recurring/Upsell).
+- Verify Consolidated P&L Revenue breakdown.
+- Verify Consolidated P&L Expense breakdown.
+- Fix every build error and runtime error before considering the task complete.
+
+Finally provide:
+
+- A summary of every modified file.
+- A summary of every implemented feature.
+- Confirmation that no existing functionality was removed.
+- Confirmation that the application builds, runs, previews, and publishes successfully.

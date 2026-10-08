@@ -1,0 +1,140 @@
+Before making any changes, create a checkpoint.
+
+First, analyze the entire existing application, database, reports, and business logic.
+
+IMPORTANT:
+- Do NOT redesign or rebuild the application.
+- Do NOT change the existing UI/UX unless explicitly requested.
+- Do NOT remove any existing functionality.
+- Preserve all existing reports, calculations, filters, dashboards, and database records.
+- Maintain backward compatibility with all existing data.
+- After implementing every change, verify that the application still runs correctly and fix any issues before finishing.
+
+Implement the following enhancements:
+
+1. Revenue Entry
+- Add a new field "Project Name" immediately before the "Client" field.
+- Store it in the database.
+- Include it in Add, Edit, View, Search, Reports, Excel Import and Export.
+
+2. Revenue Classification
+Replace the existing revenue type logic with the following business rules:
+
+A client's very first payment should automatically be classified as "Fresh".
+
+If the same client already has previous revenue entries, every new payment should automatically default to "Recurring".
+
+For existing clients, the user should also have the option to change the payment type from "Recurring" to "Upsell" before saving whenever the payment is an additional sale rather than the normal recurring payment.
+
+Revenue Types should therefore be:
+- Fresh
+- Recurring
+- Upsell
+
+Business Rules:
+- First payment of a client = Fresh.
+- Future payments = Recurring by default.
+- User can manually select Upsell for existing clients.
+- Fresh should never be selectable for existing clients unless it is actually a completely new client.
+- Existing historical records should continue to work correctly.
+
+Update every report, dashboard, KPI, chart, filter, revenue summary and calculation to use this logic.
+
+3. Remove Head
+- Remove the Head field from Revenue Entry.
+- Remove it from the database only if no longer required.
+- Replace every Head-wise revenue breakdown with:
+  - Fresh
+  - Recurring
+  - Upsell
+
+4. Revenue Breakdown
+Every Revenue Breakdown should display:
+- Fresh
+- Recurring
+- Upsell
+
+5. Excel Import & Export
+Add Bulk Import and Bulk Export for:
+- Revenue Entries
+- Expense Entries
+
+Requirements:
+- Import from Excel.
+- Export to Excel.
+- Downloadable template.
+- Data validation.
+- Proper error messages for invalid rows.
+
+6. New Brand
+Add a new Brand:
+BuzzFlick
+
+It should function exactly like CA and TX and appear everywhere brands are used including:
+- Revenue Entry
+- Expense Entry
+- Reports
+- Dashboards
+- P&L
+- Filters
+- Charts
+- Consolidated Reports
+- Excel Import/Export
+
+7. Rename Application
+Replace every occurrence of:
+Boutique FinSys
+
+with
+
+TekRevol FinSys
+
+including:
+- Login Page
+- Header
+- Dashboard
+- Navigation
+- Browser Title
+- Reports
+- Everywhere else.
+
+8. Month & Year Filters
+Improve report filters by:
+- Showing month names instead of numbers.
+- Adding a separate Year filter.
+- Every report should refresh according to the selected Month and Year.
+
+9. Month-wise Consolidated P&L Comparison
+Create a Month-wise Consolidated Profit & Loss report.
+
+Include:
+- Revenue
+- Expenses
+- Gross Profit
+- Net Profit
+- Profit Margin
+
+Requirements:
+- Side-by-side monthly comparison.
+- Year filter.
+- Excel Export.
+- Use the existing P&L calculation logic.
+
+10. Final Testing
+Before finishing:
+- Test Revenue Entry.
+- Test Expense Entry.
+- Test Reports.
+- Test Dashboards.
+- Test Filters.
+- Test Revenue Classification.
+- Test Excel Import.
+- Test Excel Export.
+- Test P&L.
+- Fix any errors introduced.
+
+Finally provide a concise summary of:
+- Database changes.
+- Files modified.
+- Features implemented.
+- Any assumptions made.

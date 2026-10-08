@@ -48,3 +48,21 @@ Thumbs.db
 *.mov
 *.wmv
 .env
+node_modules/
+dist/
+.pnpm-store/
+*.log
+.DS_Store
+.env
+.env.local
+finance.db-shm
+finance.db-wal
+server/finance.db.bak-*
+
+# Local env
+.env*
+!.env.example
+
+# Editor
+.vscode/
+.idea/

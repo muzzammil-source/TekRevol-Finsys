@@ -1,0 +1,250 @@
+Before making any changes, create a checkpoint.
+
+IMPORTANT
+- Do NOT redesign or rebuild the application.
+- Do NOT change the existing UI/UX unless required for the features below.
+- Preserve all existing functionality, reports, calculations, dashboards, filters and business logic.
+- Maintain backward compatibility with existing data.
+- Update all related forms, APIs, reports, Excel Import/Export templates and validations wherever required.
+
+Implement the following enhancements:
+
+==================================================
+1. INTERCOMPANY REPORT
+==================================================
+
+- Keep the current report layout.
+- For Recoverable/Payable amounts, show a tooltip on hover displaying the Brand-wise breakup instead of adding additional tables.
+- Create an Intercompany Transactions module with:
+  • From Entity
+  • To Entity
+  • Amount
+  • Currency
+  • Date
+  • Description
+- These transactions must automatically flow into the Intercompany Report.
+- Track funding sent to Pakistan from other entities to cover Pakistan expenses and include it within Intercompany reporting.
+
+==================================================
+2. REVENUE ENTRY
+==================================================
+
+Add a new field:
+
+Cash Received In (Entity)
+
+Options:
+• TekRevol CA
+• TekRevol TX
+• TekRevol AE
+• TekRevol PK
+• BuzzFlick
+
+Include this field in Import/Export templates.
+
+==================================================
+3. ACTUAL MONTH & MONTHLY ALLOCATION
+==================================================
+
+Add an "Actual Month" field to BOTH:
+
+- Revenue Entry
+- Expense Entry
+
+All reports, dashboards, P&Ls, bank reports, allocation reports and summaries must use Actual Month for reporting.
+
+Update Excel templates accordingly.
+
+Additionally:
+
+Allow BOTH Revenue and Expenses to be allocated across multiple months.
+
+Example:
+
+Revenue
+Total = $12,000
+
+July = $5,000
+August = $7,000
+
+Expense
+Total = $9,000
+
+July = $4,000
+August = $5,000
+
+Each monthly allocation must also allow different Brand Allocation percentages for each month.
+
+Example:
+
+July
+CA 60%
+TX 40%
+
+August
+CA 30%
+TX 50%
+BuzzFlick 20%
+
+The system must automatically use these allocations in every report.
+
+==================================================
+4. MONTHLY CONSOLIDATED P&L
+==================================================
+
+Add a Brand slicer.
+
+Options:
+
+• All Brands
+• TekRevol CA
+• TekRevol TX
+• TekRevol AE
+• TekRevol PK
+• BuzzFlick
+
+==================================================
+5. PAID BY ENTITY
+==================================================
+
+Replace existing options with:
+
+• TekRevol CA
+• TekRevol TX
+• TekRevol AE
+• TekRevol PK
+• BuzzFlick
+
+==================================================
+6. BANKS
+==================================================
+
+Replace the Bank dropdown with entity-specific banks.
+
+TekRevol CA
+- Wells Fargo CA
+
+TekRevol TX
+- Chase TX
+
+TekRevol AE
+- Emirates AED
+- Emirates USD
+
+TekRevol PK
+- Meezan Bank
+- Bank AL Habib
+
+BuzzFlick
+- Bank of America (BOA)
+
+The Bank dropdown must automatically display only the banks belonging to the selected entity.
+
+==================================================
+7. EXPENSE ENTRY REDESIGN
+==================================================
+
+Simplify and standardize Expense Entry.
+
+Fields should be:
+
+• Expense Name
+• Expense Type
+• Expense Category
+• Department
+• Remaining existing fields
+
+Business Logic:
+
+Expense Name
+- Free text transaction description only.
+Examples:
+- July Office Rent
+- Dell Laptop for Ali
+- Google Workspace July
+
+Expense Type
+- Dropdown linked directly to the Chart of Accounts.
+- This is the reporting account.
+
+Expense Category
+- Higher-level grouping.
+
+Every Expense Type must belong to one Expense Category.
+
+Reports must summarize expenses by Expense Type, NOT by Expense Name.
+
+Expense Name should only appear in transaction listings and transaction details.
+
+==================================================
+8. CHART OF ACCOUNTS
+==================================================
+
+Update the Chart of Accounts to support the new Expense Type structure.
+
+Users should be able to:
+
+- Create Expense Types
+- Edit Expense Types
+- Delete Expense Types
+
+Every Expense Type must belong to one Expense Category.
+
+Expense Entry must automatically load Expense Types from Chart of Accounts.
+
+==================================================
+9. DEPARTMENT
+==================================================
+
+Department should allow:
+
+- Existing Department selection.
+- Custom Department creation directly from Expense Entry without leaving the screen.
+
+==================================================
+10. EXCEL IMPORT / EXPORT
+==================================================
+
+Update every Import and Export template.
+
+Include all new fields including:
+
+- Actual Month
+- Cash Received In
+- Expense Type
+- Expense Category
+- Department
+- Monthly Allocation
+- Brand Allocation
+- Intercompany fields
+
+Maintain validation and clear error messages.
+
+==================================================
+11. REPORTING
+==================================================
+
+Ensure all reports automatically reflect:
+
+- Actual Month
+- Monthly Allocation
+- Brand Allocation
+- Expense Type
+- Cash Received Entity
+- Intercompany Transactions
+- Pakistan Funding
+
+No existing report should break.
+
+==================================================
+FINAL REQUIREMENTS
+==================================================
+
+- Do NOT remove any existing functionality.
+- Do NOT redesign the interface.
+- Preserve all current reports.
+- Preserve all calculations.
+- Preserve all filters.
+- Keep backward compatibility with existing data.
+- Ensure every new field is fully integrated throughout the application.
+- Verify that Preview and Published versions both work correctly after all changes.
