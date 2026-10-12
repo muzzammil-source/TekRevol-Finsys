@@ -64,8 +64,32 @@ for (const envFile of [path.join(__dirname, ".env"), path.join(__dirname, "..", 
 // Point DB_PATH at a mounted volume (e.g. /data/finance.db) and the data
 // survives. Unset, it stays beside the server, which is what local
 // development wants.
-const DB_PATH = String(process.env.DB_PATH || "").trim() || path.join(__dirname, "finance.db");
+const LEGACY_DB_PATH = path.join(__dirname, "finance.db");
+const DB_PATH = String(process.env.DB_PATH || "").trim() || LEGACY_DB_PATH;
 fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
+
+// One-time migration onto a volume (2026-10-13). The first boot after
+// DB_PATH is pointed at a mounted volume finds it empty, while the old
+// database is still sitting in the image next to the server — so it is
+// copied across rather than silently starting an empty set of books. The
+// WAL and shared-memory files come too: a database copied without its WAL
+// loses whatever had not been checkpointed.
+//
+// This runs only when the target does not exist, so it never overwrites a
+// volume that already holds the books. Once the database stops being
+// committed to git the legacy file disappears from the image and this
+// becomes a no-op — which is the point: it exists to carry the data across
+// that one deploy.
+if (DB_PATH !== LEGACY_DB_PATH && !fs.existsSync(DB_PATH) && fs.existsSync(LEGACY_DB_PATH)) {
+  try {
+    for (const suffix of ["", "-wal", "-shm"]) {
+      if (fs.existsSync(LEGACY_DB_PATH + suffix)) fs.copyFileSync(LEGACY_DB_PATH + suffix, DB_PATH + suffix);
+    }
+    console.log(`[db] seeded ${DB_PATH} from ${LEGACY_DB_PATH} (first boot on this volume)`);
+  } catch (e) {
+    console.error("[db] could not seed the database onto the volume:", e);
+  }
+}
 console.log(`[db] ${DB_PATH}`);
 const db = new Database(DB_PATH);
 db.pragma("journal_mode = WAL");
