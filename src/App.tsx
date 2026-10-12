@@ -13,6 +13,9 @@ import ReportsBrandPnl from "@/pages/reports-brand-pnl";
 import ReportsRevenueStreams from "@/pages/reports-revenue-streams";
 import ReportsTrends from "@/pages/reports-trends";
 import ReportsExecutive from "@/pages/reports-executive";
+import ImportLedger from "@/pages/import-ledger";
+import ReportsAging from "@/pages/reports-aging";
+import ReportsIntercompany from "@/pages/reports-intercompany";
 import Accounts from "@/pages/accounts";
 import ExchangeRates from "@/pages/exchange-rates";
 import TrialBalance from "@/pages/trial-balance";
@@ -65,11 +68,21 @@ function Router() {
         <Route path="/accounting/trial-balance" component={TrialBalance} />
         <Route path="/accounting/contacts" component={Contacts} />
         <Route path="/accounting/journal-entry" component={JournalEntry} />
+        {/* Staging a file needs `import`; posting the batch needs `post`,
+            both enforced server-side. The page itself is open to anyone who
+            can see the books. */}
+        <Route path="/accounting/import" component={ImportLedger} />
 
         {/* Reports */}
         <Route path="/reports/profit-loss">{() => <FinancialStatements report="pnl" />}</Route>
         <Route path="/reports/balance-sheet">{() => <FinancialStatements report="balance-sheet" />}</Route>
         <Route path="/reports/cash-flow">{() => <FinancialStatements report="cash-flow" />}</Route>
+        <Route path="/reports/aging" component={ReportsAging} />
+        {/* The matrix names every entity in the group, so it is only for
+            users who may see them all (the server rule says the same). */}
+        <Route path="/reports/intercompany">
+          {() => <AdminOnly what="the intercompany ledger"><ReportsIntercompany /></AdminOnly>}
+        </Route>
 
         {/* Settings — Admin only */}
         <Route path="/settings/entities">{() => <AdminOnly what="entity settings"><SettingsEntities /></AdminOnly>}</Route>
@@ -91,7 +104,9 @@ function Router() {
         {/* Pre-refactor paths, kept as redirect-equivalents so nothing 404s. */}
         <Route path="/bank-transactions-hub" component={BankTransactionsHub} />
         <Route path="/accounting/reconciliation">{() => <AdminOnly what="reconciliation"><BankReconciliation /></AdminOnly>}</Route>
-        <Route path="/accounting/reports" component={FinancialStatements} />
+        {/* Legacy deep link. Rendered through a child so the page's own
+            optional `report` prop isn't mistaken for wouter's route props. */}
+        <Route path="/accounting/reports">{() => <FinancialStatements />}</Route>
         <Route path="/accounts" component={Accounts} />
         <Route path="/exchange-rates">{() => <AdminOnly what="currency settings"><ExchangeRates /></AdminOnly>}</Route>
 

@@ -15,6 +15,7 @@ import {
   assertEntityAccess,
   assertCapability,
 } from "./auth";
+import { parseTransactionDetailByAccount, pairTransactions, inferAccountType } from "./qb-import";
 import {
   Configuration,
   CountryCode,
@@ -572,6 +573,18 @@ ensureColumn("bank_transactions", "journalEntryId", "journalEntryId INTEGER DEFA
 // "Save for review" (2026-09-17): categorization prepared by a user who can't
 // post (Bookkeeper) — JSON { accountId, chargedToEntityId, contactId, splits }.
 // Not accounting data; cleared once the transaction is posted.
+// Import provenance (Phase C). importRowHash is a stable fingerprint of the
+// source transaction, so running the same export twice cannot double the
+// books — the UNIQUE index below is what actually enforces that, rather than
+// a check the importer could forget to make.
+ensureColumn("journal_entries", "importBatchId", "importBatchId INTEGER DEFAULT NULL REFERENCES import_batches(id)");
+ensureColumn("journal_entries", "importRowHash", "importRowHash TEXT DEFAULT NULL");
+try {
+  db.exec("CREATE UNIQUE INDEX IF NOT EXISTS ux_journal_entries_import_row ON journal_entries(importRowHash) WHERE importRowHash IS NOT NULL");
+} catch (e) {
+  console.error("Migration error (import row hash index):", e);
+}
+
 ensureColumn("bank_transactions", "stagedJson", "stagedJson TEXT DEFAULT NULL");
 ensureColumn("bank_transactions", "stagedByUserId", "stagedByUserId INTEGER DEFAULT NULL");
 ensureColumn("bank_transactions", "stagedAt", "stagedAt TEXT DEFAULT NULL");
@@ -734,6 +747,26 @@ db.exec(`
     lockedAt TEXT DEFAULT NULL,
     lockedBy TEXT DEFAULT '',
     UNIQUE(entityId, periodMonth)
+  );
+
+  -- ======= LEDGER IMPORT (Phase C, 2026-10-13) =======
+  -- One row per uploaded file. The parsed preview is kept in payloadJson so
+  -- the confirm step doesn't need the file uploaded a second time, and so
+  -- what the user approved is exactly what gets written.
+  CREATE TABLE IF NOT EXISTS import_batches (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source TEXT NOT NULL DEFAULT 'QuickBooks',
+    filename TEXT NOT NULL DEFAULT '',
+    entityId INTEGER NOT NULL REFERENCES entities(id),
+    status TEXT NOT NULL DEFAULT 'PREVIEW' CHECK (status IN ('PREVIEW','DRAFT','POSTED','DISCARDED')),
+    fileHash TEXT NOT NULL DEFAULT '',
+    payloadJson TEXT NOT NULL DEFAULT '',
+    rowCount INTEGER NOT NULL DEFAULT 0,
+    entryCount INTEGER NOT NULL DEFAULT 0,
+    quarantineCount INTEGER NOT NULL DEFAULT 0,
+    createdByUserId INTEGER DEFAULT NULL,
+    createdAt TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    postedAt TEXT DEFAULT NULL
   );
 
   CREATE INDEX IF NOT EXISTS idx_reconciliations_bank_account_status ON reconciliations(bankAccountId, status);
@@ -5545,7 +5578,7 @@ app.get("/api/reports/general-ledger", (req, res) => {
     SELECT jl.id as lineId, jl.accountId, jl.debit, jl.credit, jl.exchangeRate, jl.memo, jl.brandId,
            a.code, a.name as accountName, a.type, a.subType, a.entityId as accountEntityId,
            je.id as journalEntryId, je.entryNumber, je.transactionDate, je.description, je.reference, je.entityId,
-           je.accountingPeriod, je.chargedToEntityId,
+           je.accountingPeriod, je.chargedToEntityId, je.source,
            jl.contactId, ct.name as contactName, ct.contactType
     FROM journal_lines jl
     JOIN journal_entries je ON je.id = jl.journalEntryId
@@ -5578,6 +5611,30 @@ app.get("/api/reports/general-ledger", (req, res) => {
      WHERE jl.accountId = ? AND je.status = 'Posted' AND je.transactionDate < ?` +
     (entityId ? " AND je.entityId = ?" : "");
   const openingStmt = db.prepare(openingSql);
+
+  // The "Split" column of a Transaction Detail by Account report: the other
+  // account(s) the same entry touched. One other account shows that
+  // account's name; several show "-SPLIT-", the convention QuickBooks uses
+  // and the one an accountant reading this report expects. Derived per
+  // entry, cached so a 50-line entry is looked up once.
+  const splitStmt = db.prepare(
+    `SELECT jl.accountId, a.code, a.name FROM journal_lines jl
+     JOIN accounts a ON a.id = jl.accountId
+     WHERE jl.journalEntryId = ? ORDER BY jl.id`,
+  );
+  const splitCache = new Map<number, { accountId: number; code: string; name: string }[]>();
+  const splitsFor = (journalEntryId: number) => {
+    if (!splitCache.has(journalEntryId)) {
+      const seen = new Set<number>();
+      splitCache.set(
+        journalEntryId,
+        (splitStmt.all(journalEntryId) as any[])
+          .filter((l) => !seen.has(l.accountId) && seen.add(l.accountId))
+          .map((l) => ({ accountId: l.accountId, code: l.code, name: l.name })),
+      );
+    }
+    return splitCache.get(journalEntryId)!;
+  };
 
   const byAccount = new Map<number, any>();
   for (const r of rows) {
@@ -5622,6 +5679,10 @@ app.get("/api/reports/general-ledger", (req, res) => {
       contactId: r.contactId,
       contactName: r.contactName,
       contactType: r.contactType,
+      // Where this line came from, in the "Transaction Type" sense: a bank
+      // feed posting, a manual journal, an import.
+      transactionType: r.source || "Manual",
+      splitAccounts: splitsFor(r.journalEntryId).filter((s) => s.accountId !== r.accountId),
       debit,
       credit,
       runningBalance: acct.closingBalance,
@@ -7236,6 +7297,79 @@ app.get("/api/reports/subledger", (req, res) => {
     WHERE jl.accountId = ? AND je.status = 'Posted' AND je.transactionDate <= ?${entityClause}
     GROUP BY jl.contactId
     ORDER BY (jl.contactId IS NULL), lower(ct.name)`).all(...params) as any[];
+  // ---- Aging (2026-10-12) ----
+  // There are no invoice documents behind these balances — open items live
+  // as GL lines tagged with a contact — so aging works the way an
+  // accountant does it by hand: charges (the account's natural side) are
+  // open items, and payments are applied against the OLDEST open charge
+  // first (FIFO). What is left unpaid is bucketed by the age of the charge
+  // that remains, not by the age of the net balance, which would otherwise
+  // let a recent payment make a year-old debt look current.
+  //
+  // Age is measured from the transaction date plus `netTermsDays` (0 by
+  // default — a deliberate decision recorded in the phase tracker: these
+  // books carry no payment terms yet, so "Current" means dated today or
+  // later rather than "not yet due").
+  const netTermsDays = Math.max(0, Number((req.query as any).netTermsDays) || 0);
+  const detailParams: any[] = [account.id, asOf];
+  if (entityId) detailParams.push(Number(entityId));
+  const detailRows = db.prepare(`
+    SELECT jl.contactId, je.transactionDate,
+           (jl.debit - jl.credit) * jl.exchangeRate AS netUSD
+    FROM journal_lines jl
+    JOIN journal_entries je ON je.id = jl.journalEntryId
+    WHERE jl.accountId = ? AND je.status = 'Posted' AND je.transactionDate <= ?${entityClause}
+    ORDER BY je.transactionDate, je.id, jl.id`).all(...detailParams) as any[];
+
+  const BUCKETS = ["current", "d1_30", "d31_60", "d61_90", "d90_plus"] as const;
+  type Bucket = (typeof BUCKETS)[number];
+  const bucketFor = (daysOverdue: number): Bucket =>
+    daysOverdue <= 0 ? "current"
+      : daysOverdue <= 30 ? "d1_30"
+      : daysOverdue <= 60 ? "d31_60"
+      : daysOverdue <= 90 ? "d61_90"
+      : "d90_plus";
+  const daysBetween = (from: string, to: string) =>
+    Math.floor((Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)) / 86400000);
+
+  const agingByContact = new Map<number | null, Record<Bucket, number>>();
+  const byContactLines = new Map<number | null, { date: string; amount: number }[]>();
+  for (const r of detailRows) {
+    const key = r.contactId ?? null;
+    if (!byContactLines.has(key)) byContactLines.set(key, []);
+    // Signed so a positive amount is always a charge on this account's
+    // natural side, whichever side that is (AR debit, AP credit).
+    byContactLines.get(key)!.push({ date: r.transactionDate, amount: sign * r.netUSD });
+  }
+  for (const [contactId, lines] of byContactLines) {
+    const open: { date: string; amount: number }[] = [];
+    let unappliedCredit = 0;
+    for (const l of lines) {
+      if (l.amount >= 0) { open.push({ ...l }); continue; }
+      // A payment: consume the oldest open charges first.
+      let left = -l.amount;
+      while (left > 0.005 && open.length) {
+        const take = Math.min(left, open[0].amount);
+        open[0].amount -= take;
+        left -= take;
+        if (open[0].amount <= 0.005) open.shift();
+      }
+      // Paid more than is open (a prepayment or an unapplied credit note):
+      // it stays as a credit and lands in Current, where QuickBooks also
+      // shows unapplied credits.
+      unappliedCredit += left;
+    }
+    const buckets: Record<Bucket, number> = { current: 0, d1_30: 0, d31_60: 0, d61_90: 0, d90_plus: 0 };
+    for (const o of open) {
+      const due = addDays(o.date, netTermsDays);
+      buckets[bucketFor(daysBetween(due, asOf))] += o.amount;
+    }
+    buckets.current -= unappliedCredit;
+    for (const b of BUCKETS) buckets[b] = Math.round(buckets[b] * 100) / 100;
+    agingByContact.set(contactId, buckets);
+  }
+
+  const emptyBuckets = (): Record<Bucket, number> => ({ current: 0, d1_30: 0, d31_60: 0, d61_90: 0, d90_plus: 0 });
   const items = rows
     .map((r) => ({
       contactId: r.contactId,
@@ -7244,19 +7378,425 @@ app.get("/api/reports/subledger", (req, res) => {
       balanceUSD: Math.round(sign * r.netUSD * 100) / 100,
       lineCount: r.lineCount,
       lastActivityDate: r.lastActivityDate,
+      aging: agingByContact.get(r.contactId ?? null) ?? emptyBuckets(),
     }))
     .filter((r) => Math.abs(r.balanceUSD) >= 0.005);
   const controlBalanceUSD = Math.round(sign * rows.reduce((s, r) => s + r.netUSD, 0) * 100) / 100;
   const itemsTotalUSD = Math.round(items.reduce((s, r) => s + r.balanceUSD, 0) * 100) / 100;
+  const agingTotals = emptyBuckets();
+  for (const i of items) for (const b of BUCKETS) agingTotals[b] = Math.round((agingTotals[b] + i.aging[b]) * 100) / 100;
   res.json({
     account,
     entityId: entityId ? Number(entityId) : null,
     asOfDate: asOf,
+    netTermsDays,
     items,
     controlBalanceUSD,
     itemsTotalUSD,
+    agingTotals,
+    // Each contact's buckets must add back to its own balance; if this is
+    // ever false the aging is lying and the report says so rather than
+    // quietly showing a prettier number.
+    agingReconciles:
+      Math.abs(BUCKETS.reduce((s, b) => s + agingTotals[b], 0) - itemsTotalUSD) < 0.01,
     reconciles: Math.abs(controlBalanceUSD - itemsTotalUSD) < 0.01,
   });
+});
+
+// GET /api/reports/intercompany-balances — who owes whom, entity by entity
+// (2026-10-12).
+//
+// Every cross-entity posting raises a matched pair: the payer's "Due From
+// Affiliates — X" (asset) and X's "Due To Affiliates — payer" (liability),
+// each a counterparty-specific head (accounts.subType = 'Intercompany
+// Clearing', counterpartyEntityId = the other side). This report reads those
+// heads straight from the ledger and lays them out as an owner × counterparty
+// matrix.
+//
+// The pair must mirror: what A says B owes it should equal what B says it
+// owes A. Any difference is a real problem — a one-sided posting, or an
+// entry posted at different rates on each side — so each cell carries its
+// counter-cell and the gap between them rather than netting them silently.
+app.get("/api/reports/intercompany-balances", (req, res) => {
+  const asOf = (req.query as any).asOfDate || todayIso();
+  const entities = db.prepare("SELECT id, name, functionalCurrency FROM entities ORDER BY lower(name)").all() as any[];
+
+  const rows = db.prepare(`
+    SELECT a.entityId AS ownerEntityId, a.counterpartyEntityId, a.id AS accountId, a.code, a.name, a.type,
+           COALESCE(SUM(jl.debit * COALESCE(jl.exchangeRate, 1)), 0)
+             - COALESCE(SUM(jl.credit * COALESCE(jl.exchangeRate, 1)), 0) AS netUSD
+    FROM accounts a
+    LEFT JOIN journal_lines jl ON jl.accountId = a.id
+    LEFT JOIN journal_entries je ON je.id = jl.journalEntryId
+      AND je.status = 'Posted' AND je.transactionDate <= ?
+    WHERE a.subType = 'Intercompany Clearing' AND a.counterpartyEntityId IS NOT NULL
+    GROUP BY a.id
+  `).all(asOf) as any[];
+
+  // Debits minus credits, with no per-type flip: that already reads as
+  // "positive = the owner is owed". A Due From (asset) carries a debit
+  // balance and is a receivable; a Due To (liability) carries a credit
+  // balance and so comes out negative, which is exactly what owing means
+  // here. Flipping liabilities would make both sides of a pair claim to be
+  // owed — which is how this was caught.
+  const cellKey = (owner: number, counterparty: number) => `${owner}:${counterparty}`;
+  const net = new Map<string, number>();
+  const accountsByCell = new Map<string, any[]>();
+  for (const r of rows) {
+    if (r.ownerEntityId == null) continue;
+    const key = cellKey(r.ownerEntityId, r.counterpartyEntityId);
+    net.set(key, Math.round(((net.get(key) || 0) + r.netUSD) * 100) / 100);
+    if (!accountsByCell.has(key)) accountsByCell.set(key, []);
+    accountsByCell.get(key)!.push({
+      accountId: r.accountId, code: r.code, name: r.name, type: r.type,
+      balanceUSD: Math.round(r.netUSD * 100) / 100,
+    });
+  }
+
+  const cells: any[] = [];
+  const mismatches: any[] = [];
+  for (const owner of entities) {
+    for (const counterparty of entities) {
+      if (owner.id === counterparty.id) continue;
+      const key = cellKey(owner.id, counterparty.id);
+      const mirrorKey = cellKey(counterparty.id, owner.id);
+      const amount = net.get(key) || 0;
+      const mirror = net.get(mirrorKey) || 0;
+      if (amount === 0 && mirror === 0) continue;
+      // A owes B, so A's receivable should be B's payable: equal and
+      // opposite. The gap is what fails to eliminate on consolidation.
+      const difference = Math.round((amount + mirror) * 100) / 100;
+      cells.push({
+        ownerEntityId: owner.id, ownerName: owner.name,
+        counterpartyEntityId: counterparty.id, counterpartyName: counterparty.name,
+        receivableUSD: amount > 0 ? amount : 0,
+        payableUSD: amount < 0 ? -amount : 0,
+        netUSD: amount,
+        mirrorNetUSD: mirror,
+        difference,
+        reciprocal: Math.abs(difference) < 0.01,
+        accounts: accountsByCell.get(key) || [],
+      });
+      if (Math.abs(difference) >= 0.01 && owner.id < counterparty.id) {
+        mismatches.push({
+          entityAId: owner.id, entityAName: owner.name,
+          entityBId: counterparty.id, entityBName: counterparty.name,
+          aSaysUSD: amount, bSaysUSD: mirror, differenceUSD: difference,
+        });
+      }
+    }
+  }
+
+  // Across the whole group these balances must cancel out — anything left
+  // over would survive consolidation as a phantom asset or liability.
+  const groupNetUSD = Math.round(cells.reduce((s, c) => s + c.netUSD, 0) * 100) / 100;
+  res.json({
+    asOfDate: asOf,
+    entities: entities.map((e) => ({ id: e.id, name: e.name, functionalCurrency: e.functionalCurrency })),
+    cells,
+    mismatches,
+    groupNetUSD,
+    eliminates: Math.abs(groupNetUSD) < 0.01,
+  });
+});
+
+// ======= LEDGER IMPORT — QuickBooks Transaction Detail by Account =======
+// (Phase C, 2026-10-13. Parser and its tests: server/qb-import.ts.)
+//
+// Three steps, deliberately separated so nothing reaches the books without a
+// human having seen it:
+//   1. preview — parse, pair the printed halves, show what WOULD be created
+//      (including accounts that don't exist yet, and anything quarantined);
+//   2. commit  — create the confirmed accounts and write Draft entries;
+//   3. post    — turn the batch into the book of record, only once nothing
+//      is quarantined.
+// Draft is where imports live until someone approves them: a posted line is
+// immutable (CLAUDE.md §0), so a bad import must be caught before posting,
+// not voided afterwards.
+
+const ledgerImportUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
+
+/**
+ * Stable fingerprint of one source transaction. Deliberately independent of
+ * the batch: re-importing the same file, or an overlapping export, hits the
+ * UNIQUE index and is skipped rather than doubling the books.
+ */
+function importRowHashFor(entityId: number, e: { date: string; transactionType: string; num: string; name: string; lines: { account: string; amount: number }[] }): string {
+  const legs = e.lines
+    .map((l) => `${l.account.trim().toLowerCase()}:${l.amount.toFixed(2)}`)
+    .sort()
+    .join(";");
+  return crypto
+    .createHash("sha256")
+    .update([entityId, e.date, e.transactionType.toLowerCase(), e.num.toLowerCase(), e.name.toLowerCase(), legs].join("|"))
+    .digest("hex");
+}
+
+/** Case-insensitive match of an imported account name to an existing head. */
+function matchExistingAccount(name: string, entityId: number): any {
+  return db
+    .prepare(
+      `SELECT * FROM accounts
+       WHERE lower(name) = lower(?) AND (entityId IS NULL OR entityId = ?)
+       ORDER BY (entityId IS NULL), isActive DESC, id LIMIT 1`,
+    )
+    .get(name.trim(), entityId);
+}
+
+app.post("/api/imports/quickbooks/preview", ledgerImportUpload.single("file"), (req, res) => {
+  try {
+    const entityId = Number(req.body?.entityId);
+    if (!entityId) return res.status(400).json({ error: "entityId is required" });
+    assertEntityAccess(req, entityId, "this entity");
+    const entity = db.prepare("SELECT * FROM entities WHERE id = ?").get(entityId) as any;
+    if (!entity) return res.status(400).json({ error: "Entity not found" });
+    if (!req.file) return res.status(400).json({ error: 'No file uploaded (field name: "file")' });
+
+    const text = req.file.buffer.toString("utf8");
+    const parsed = parseTransactionDetailByAccount(text);
+    if (parsed.rows.length === 0) {
+      return res.status(400).json({
+        error: "Nothing importable was found in this file.",
+        warnings: parsed.warnings,
+      });
+    }
+    const paired = pairTransactions(parsed);
+
+    // Which account names are already heads this entity can post to, and
+    // what the rest would have to be created as. The guess is shown, never
+    // applied — account type decides the sign of every report.
+    const accountNames = [...new Set(parsed.rows.flatMap((r) => [r.account, ...(r.split && !/^-?\s*split\s*-?$/i.test(r.split) ? [r.split] : [])]))];
+    const accounts = accountNames.map((name) => {
+      const existing = matchExistingAccount(name, entityId);
+      const guess = inferAccountType(name);
+      return {
+        name,
+        existingAccountId: existing?.id ?? null,
+        existingCode: existing?.code ?? null,
+        existingType: existing?.type ?? null,
+        suggestedType: guess.type,
+        suggestedSubType: guess.subType,
+        confidence: guess.confidence,
+      };
+    });
+
+    // Already in the books? Shown now rather than discovered at commit.
+    const hashStmt = db.prepare("SELECT id, entryNumber, status FROM journal_entries WHERE importRowHash = ?");
+    const entries = paired.entries.map((e) => {
+      const hash = importRowHashFor(entityId, e);
+      const existing = hashStmt.get(hash) as any;
+      return { ...e, importRowHash: hash, duplicateOf: existing ? { id: existing.id, entryNumber: existing.entryNumber, status: existing.status } : null };
+    });
+
+    const fileHash = crypto.createHash("sha256").update(req.file.buffer).digest("hex");
+    const payload = { entries, quarantine: paired.quarantine, accounts, warnings: parsed.warnings, parsedAccounts: parsed.accounts };
+    const batchId = Number(
+      db
+        .prepare(
+          `INSERT INTO import_batches (source, filename, entityId, status, fileHash, payloadJson, rowCount, entryCount, quarantineCount, createdByUserId)
+           VALUES ('QuickBooks', ?, ?, 'PREVIEW', ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(req.file.originalname || "", entityId, fileHash, JSON.stringify(payload), parsed.rows.length, entries.length, paired.quarantine.length, authOf(req).user.id)
+        .lastInsertRowid,
+    );
+
+    res.json({
+      batchId,
+      entityId,
+      filename: req.file.originalname || "",
+      rowCount: parsed.rows.length,
+      skippedRows: parsed.skipped,
+      ...payload,
+      duplicateCount: entries.filter((e) => e.duplicateOf).length,
+      newAccountCount: accounts.filter((a) => !a.existingAccountId).length,
+    });
+  } catch (err: any) {
+    res.status(hasHttpStatus(err) ? err.status : 500).json({ error: err?.message || "Could not read that file" });
+  }
+});
+
+app.post("/api/imports/quickbooks/:id/commit", (req, res) => {
+  try {
+    const batch = db.prepare("SELECT * FROM import_batches WHERE id = ?").get(req.params.id) as any;
+    if (!batch) return res.status(404).json({ error: "Import batch not found" });
+    assertEntityAccess(req, batch.entityId, "this import's entity");
+    if (batch.status !== "PREVIEW") return res.status(409).json({ error: `This batch is already ${batch.status.toLowerCase()}` });
+
+    const payload = JSON.parse(batch.payloadJson || "{}");
+    const entity = db.prepare("SELECT * FROM entities WHERE id = ?").get(batch.entityId) as any;
+    const currency = entity?.functionalCurrency || "USD";
+
+    // The user's confirmed decision for every account name in the file:
+    // { name, accountId } to use an existing head, or
+    // { name, create: { type, subType?, code? } } to make a new one.
+    const decisions = new Map<string, any>();
+    for (const d of (req.body?.accounts || []) as any[]) {
+      if (d?.name) decisions.set(String(d.name).trim().toLowerCase(), d);
+    }
+
+    const resolved = new Map<string, number>();
+    const created: any[] = [];
+    const run = db.transaction(() => {
+      for (const a of payload.accounts || []) {
+        const key = String(a.name).trim().toLowerCase();
+        const decision = decisions.get(key);
+        const accountId = decision?.accountId ?? a.existingAccountId;
+        if (accountId) {
+          const acc = db.prepare("SELECT * FROM accounts WHERE id = ?").get(accountId) as any;
+          if (!acc) throw new PostingError(400, `Account ${accountId} chosen for "${a.name}" no longer exists`);
+          if (acc.entityId != null && acc.entityId !== batch.entityId) {
+            throw new PostingError(400, `"${acc.name}" belongs to another entity and can't take this entity's postings`);
+          }
+          resolved.set(key, acc.id);
+          continue;
+        }
+        const type = decision?.create?.type;
+        if (!type) throw new PostingError(400, `No account chosen for "${a.name}" — pick an existing head or confirm a type to create one`);
+        if (!["Asset", "Liability", "Equity", "Revenue", "Expense"].includes(type)) {
+          throw new PostingError(400, `"${type}" is not a valid account type for "${a.name}"`);
+        }
+        const code = String(decision?.create?.code || "").trim();
+        const r = db
+          .prepare("INSERT INTO accounts (code, name, type, subType, category, entityId, currency, isActive) VALUES (?, ?, ?, ?, '', ?, ?, 1)")
+          .run(code, String(a.name).trim(), type, String(decision?.create?.subType || ""), batch.entityId, currency);
+        resolved.set(key, Number(r.lastInsertRowid));
+        created.push({ id: Number(r.lastInsertRowid), name: a.name, type });
+      }
+
+      const insertEntry = db.prepare(
+        `INSERT INTO journal_entries (entryNumber, entityId, transactionDate, postingDate, description, reference, status, source, accountingPeriod, appliedExchangeRate, exchangeRateSource, importBatchId, importRowHash)
+         VALUES (?, ?, ?, ?, ?, ?, 'Draft', 'Import', ?, ?, ?, ?, ?)`,
+      );
+      const insertLine = db.prepare(
+        `INSERT INTO journal_lines (journalEntryId, accountId, debit, credit, currency, exchangeRate, amountUSD, memo)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      );
+
+      let createdEntries = 0;
+      let skippedDuplicates = 0;
+      for (const e of payload.entries || []) {
+        if (e.duplicateOf) { skippedDuplicates++; continue; }
+        assertPeriodNotLocked(batch.entityId, e.date);
+        const month = String(e.date).slice(0, 7);
+        const rate = resolveExchangeRate(currency, month);
+        const entryId = Number(
+          insertEntry
+            .run(
+              nextEntryNumber(), batch.entityId, e.date, e.date,
+              [e.transactionType, e.name, e.memo].filter(Boolean).join(" — ") || "Imported transaction",
+              `QB import #${batch.id}${e.num ? ` · ${e.num}` : ""}`,
+              month, rate.rate, rate.source, batch.id, e.importRowHash,
+            )
+            .lastInsertRowid,
+        );
+        for (const l of e.lines) {
+          const accountId = resolved.get(String(l.account).trim().toLowerCase());
+          if (!accountId) throw new PostingError(400, `No account resolved for "${l.account}"`);
+          const native = Math.abs(l.amount);
+          insertLine.run(
+            entryId, accountId,
+            l.amount > 0 ? native : 0,
+            l.amount < 0 ? native : 0,
+            currency, rate.rate, Math.round(native * rate.rate * 100) / 100,
+            e.memo || "",
+          );
+        }
+        createdEntries++;
+      }
+
+      db.prepare("UPDATE import_batches SET status = 'DRAFT', entryCount = ? WHERE id = ?").run(createdEntries, batch.id);
+      return { createdEntries, skippedDuplicates };
+    });
+
+    const result = run();
+    res.json({
+      batchId: batch.id,
+      status: "DRAFT",
+      accountsCreated: created,
+      ...result,
+      quarantineCount: batch.quarantineCount,
+      message: "Imported as Draft entries. Review them, then post the batch.",
+    });
+  } catch (err: any) {
+    res.status(hasHttpStatus(err) ? err.status : 500).json({ error: err?.message || "Import failed" });
+  }
+});
+
+app.post("/api/import-batches/:id/post", (req, res) => {
+  try {
+    const batch = db.prepare("SELECT * FROM import_batches WHERE id = ?").get(req.params.id) as any;
+    if (!batch) return res.status(404).json({ error: "Import batch not found" });
+    assertEntityAccess(req, batch.entityId, "this import's entity");
+    if (batch.status !== "DRAFT") return res.status(409).json({ error: `Only a draft batch can be posted (this one is ${batch.status.toLowerCase()})` });
+    // The agreed rule: nothing is posted while any source transaction is
+    // unaccounted for, so a half-imported file can't become the book of record.
+    if (batch.quarantineCount > 0) {
+      return res.status(400).json({
+        error: `${batch.quarantineCount} transaction(s) from this file could not be read as balanced entries. Fix the export and re-import, or import those by hand — the batch stays in Draft until the quarantine is empty.`,
+      });
+    }
+
+    const entries = db.prepare("SELECT id, transactionDate FROM journal_entries WHERE importBatchId = ? AND status = 'Draft'").all(batch.id) as any[];
+    if (entries.length === 0) return res.status(400).json({ error: "This batch has no draft entries left to post" });
+
+    const run = db.transaction(() => {
+      const post = db.prepare("UPDATE journal_entries SET status = 'Posted' WHERE id = ?");
+      for (const e of entries) {
+        assertPeriodNotLocked(batch.entityId, e.transactionDate);
+        // The balance trigger is the real gate — it refuses any entry whose
+        // converted debits and credits differ.
+        post.run(e.id);
+      }
+      db.prepare("UPDATE import_batches SET status = 'POSTED', postedAt = CURRENT_TIMESTAMP WHERE id = ?").run(batch.id);
+    });
+    run();
+
+    res.json({ batchId: batch.id, status: "POSTED", postedEntries: entries.length });
+  } catch (err: any) {
+    res.status(hasHttpStatus(err) ? err.status : 500).json({ error: err?.message || "Could not post this batch" });
+  }
+});
+
+/** Throws away a preview, or deletes the draft entries of a committed batch. */
+app.post("/api/import-batches/:id/discard", (req, res) => {
+  try {
+    const batch = db.prepare("SELECT * FROM import_batches WHERE id = ?").get(req.params.id) as any;
+    if (!batch) return res.status(404).json({ error: "Import batch not found" });
+    assertEntityAccess(req, batch.entityId, "this import's entity");
+    if (batch.status === "POSTED") return res.status(409).json({ error: "This batch is posted — void its entries instead" });
+    const run = db.transaction(() => {
+      // Draft lines are deletable; posted ones are not, and none exist here.
+      const ids = (db.prepare("SELECT id FROM journal_entries WHERE importBatchId = ? AND status = 'Draft'").all(batch.id) as any[]).map((r) => r.id);
+      for (const id of ids) {
+        db.prepare("DELETE FROM journal_lines WHERE journalEntryId = ?").run(id);
+        db.prepare("DELETE FROM journal_entries WHERE id = ?").run(id);
+      }
+      db.prepare("UPDATE import_batches SET status = 'DISCARDED' WHERE id = ?").run(batch.id);
+      return ids.length;
+    });
+    res.json({ batchId: batch.id, status: "DISCARDED", deletedDrafts: run() });
+  } catch (err: any) {
+    res.status(hasHttpStatus(err) ? err.status : 500).json({ error: err?.message || "Could not discard this batch" });
+  }
+});
+
+app.get("/api/import-batches", (req, res) => {
+  const visible = visibleEntityIds(req);
+  let rows = db
+    .prepare("SELECT id, source, filename, entityId, status, rowCount, entryCount, quarantineCount, createdAt, postedAt FROM import_batches ORDER BY id DESC LIMIT 100")
+    .all() as any[];
+  if (visible) rows = rows.filter((b) => canAccessEntity(req, b.entityId));
+  res.json(rows);
+});
+
+app.get("/api/import-batches/:id", (req, res) => {
+  const batch = db.prepare("SELECT * FROM import_batches WHERE id = ?").get(req.params.id) as any;
+  if (!batch) return res.status(404).json({ error: "Import batch not found" });
+  if (!canAccessEntity(req, batch.entityId)) return res.status(403).json({ error: "You don't have access to this import's entity" });
+  const entries = db
+    .prepare("SELECT id, entryNumber, transactionDate, description, reference, status FROM journal_entries WHERE importBatchId = ? ORDER BY transactionDate, id")
+    .all(batch.id);
+  res.json({ ...batch, payload: JSON.parse(batch.payloadJson || "{}"), entries });
 });
 
 // ======= EXCHANGE RATES =======

@@ -1,0 +1,21 @@
+{
+  // The backend's own type-check (2026-10-13). The root tsconfig only ever
+  // covered src/**, which left every line of money math in server/ and the
+  // hook package unchecked — see CLAUDE.md §2. The server is plain Node ESM
+  // executed by tsx, so it gets no DOM lib and no JSX.
+  "include": ["server/**/*.ts"],
+  "exclude": ["node_modules", "dist", "**/*.test.ts"],
+  "compilerOptions": {
+    "noEmit": true,
+    "lib": ["esnext"],
+    "module": "esnext",
+    "target": "esnext",
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "resolveJsonModule": true,
+    "esModuleInterop": true,
+    "strict": true,
+    "skipLibCheck": true,
+    "types": ["node"]
+  }
+}

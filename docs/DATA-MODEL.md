@@ -45,6 +45,8 @@ Balances are stored/returned as debit − credit and **presented** on the accoun
 | `users.mustChangePassword` | 1 after admin creation / reset; API refuses data access until changed |
 | `user_entities (userId, entityId)` | Explicit entity access when `allEntities = 0` |
 | `sessions.tokenHash` | SHA-256 of the random cookie token (the token itself is never stored); 12h sliding expiry |
+| `import_batches` (2026-10-13) | One row per uploaded ledger export: `entityId`, `status` PREVIEW → DRAFT → POSTED (or DISCARDED), `fileHash`, `payloadJson` (the parsed preview, so the confirm step writes exactly what was approved), `rowCount` / `entryCount` / `quarantineCount` |
+| `journal_entries.importBatchId` / `importRowHash` | Import provenance. `importRowHash` is a fingerprint of the source transaction (entity + date + type + num + name + its legs) with a **partial UNIQUE index**, so re-running the same export cannot double the books — enforced by the index, not by the importer remembering to check |
 | `password_resets.tokenHash` | SHA-256 of the link token (2026-10-12) — same reasoning as sessions: the email holds the only copy, so a leaked database can't take an account |
 | `password_resets.expiresAt` / `usedAt` | 1h expiry, single use. Requesting again deletes the account's other unused rows; a completed reset also clears every session for that user |
 

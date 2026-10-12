@@ -1,5 +1,8 @@
 {
-  "include": ["src/**/*"],
+  // The hook package is part of the frontend's type surface — it is the only
+  // place the app talks HTTP — so it is checked here rather than left out
+  // (2026-10-13). The backend has its own config: tsconfig.server.json.
+  "include": ["src/**/*", "packages/*/src/**/*"],
   "exclude": ["node_modules", "build", "dist", "**/*.test.ts"],
   "compilerOptions": {
     "noEmit": true,

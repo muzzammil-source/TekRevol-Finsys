@@ -15,15 +15,42 @@ import { format, startOfYear } from 'date-fns';
 // Streamlined transaction columns — the entity lives in the account title
 // badge above, never as a column here. All drag-resizable, one shared set of
 // widths so every account card stays aligned.
+// Laid out as a QuickBooks "Transaction Detail by Account" report
+// (2026-10-12): Type / Num / Name / Memo / Split are the columns an
+// accountant reads across, and Split — the other account the entry hit — is
+// what makes a line interpretable without opening the entry.
 const GL_COLUMNS: ResizableColumnDef[] = [
-  { key: 'date', label: 'Date', width: 100 },
-  { key: 'entry', label: 'Entry #', width: 120 },
-  { key: 'description', label: 'Description', width: 330 },
-  { key: 'debit', label: 'Debit', width: 110, align: 'right' },
-  { key: 'credit', label: 'Credit', width: 110, align: 'right' },
-  { key: 'balance', label: 'Balance', width: 120, align: 'right' },
+  { key: 'date', label: 'Date', width: 94 },
+  { key: 'type', label: 'Type', width: 86 },
+  { key: 'entry', label: 'Num', width: 104 },
+  { key: 'name', label: 'Name', width: 120 },
+  { key: 'description', label: 'Memo / Description', width: 230 },
+  { key: 'split', label: 'Split', width: 140 },
+  { key: 'debit', label: 'Debit', width: 100, align: 'right' },
+  { key: 'credit', label: 'Credit', width: 100, align: 'right' },
+  { key: 'balance', label: 'Balance', width: 110, align: 'right' },
 ];
 const GL_DEFAULT_WIDTHS = defaultWidths(GL_COLUMNS);
+
+// journal_entries.source in the words a reader of this report expects.
+const TRANSACTION_TYPE_LABELS: Record<string, string> = {
+  Manual: 'Journal',
+  BankFeed: 'Bank',
+  Import: 'Import',
+  Opening: 'Opening',
+};
+
+type SplitAccount = { accountId: number; code: string; name: string };
+
+function splitLabel(splits: SplitAccount[] = []) {
+  if (splits.length === 0) return <span className="text-gray-300">—</span>;
+  if (splits.length === 1) return splits[0].name;
+  return <span className="font-medium text-gray-500">-SPLIT-</span>;
+}
+
+function splitTitle(splits: SplitAccount[] = []) {
+  return splits.map((s) => `${s.code} ${s.name}`).join('\n');
+}
 
 function money(n: number) {
   if (!n) return '';
@@ -62,7 +89,7 @@ export default function GeneralLedger() {
     () => new Map(((entities || []) as any[]).map((e) => [e.id, e])),
     [entities],
   );
-  const columns = useResizableColumns('finsys.gl.columns.v1', GL_DEFAULT_WIDTHS);
+  const columns = useResizableColumns('finsys.gl.columns.v2', GL_DEFAULT_WIDTHS);
   const accountOptions = ((allAccounts || []) as any[]).slice().sort((a, b) => String(a.code).localeCompare(String(b.code)));
 
   return (
@@ -152,16 +179,15 @@ export default function GeneralLedger() {
                     {acct.lines.map((l: any) => (
                     <TableRow key={l.lineId} className="hover:bg-gray-50/60">
                       <TableCell className="font-mono text-xs text-gray-500 whitespace-nowrap">{l.transactionDate}</TableCell>
+                      <TableCell className="text-[11px] text-gray-500 truncate" title={l.transactionType}>
+                        {TRANSACTION_TYPE_LABELS[l.transactionType] ?? l.transactionType}
+                      </TableCell>
                       <TableCell className="font-mono text-xs text-gray-500 whitespace-nowrap truncate">{l.entryNumber}</TableCell>
+                      <TableCell className="text-[12px] text-gray-700 truncate" title={l.contactName ? `${l.contactType}: ${l.contactName}` : ''} data-contact={l.contactName || undefined}>
+                        {l.contactName || <span className="text-gray-300">—</span>}
+                      </TableCell>
                       <TableCell className="min-w-0 text-[13px] text-gray-900">
-                        <div className="truncate" title={l.contactName ? `${l.contactType}: ${l.contactName} — ${l.description}` : l.description}>
-                          {l.contactName && (
-                            <span className="mr-1.5 rounded bg-gray-100 px-1.5 py-0.5 text-[10px] font-medium text-gray-600" data-contact={l.contactName}>
-                              {l.contactName}
-                            </span>
-                          )}
-                          {l.description}
-                        </div>
+                        <div className="truncate" title={l.description}>{l.description}</div>
                         {/* The entry's own header memo, when the line carries
                             a different one — the audit trail shows both.
                             Skipped when one already repeats the other (bank
@@ -171,6 +197,12 @@ export default function GeneralLedger() {
                             Entry: {l.entryDescription}
                           </div>
                         )}
+                      </TableCell>
+                      {/* The other side of the entry. More than one and this
+                          reads "-SPLIT-", as QuickBooks does — the detail is
+                          in the tooltip and on the entry itself. */}
+                      <TableCell className="text-[12px] text-gray-600 truncate" title={splitTitle(l.splitAccounts)} data-split>
+                        {splitLabel(l.splitAccounts)}
                       </TableCell>
                       <TableCell className="text-right font-mono text-[13px] tabular-nums whitespace-nowrap">{money(l.debit)}</TableCell>
                       <TableCell className="text-right font-mono text-[13px] tabular-nums whitespace-nowrap">{money(l.credit)}</TableCell>

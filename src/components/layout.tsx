@@ -3,8 +3,8 @@ export { PageContent, PageHeader, SectionLabel, SurfaceCard, StatCard, DeltaPill
 import { Sidebar, SidebarContent, SidebarFooter, SidebarGroup, SidebarGroupContent, SidebarGroupLabel, SidebarHeader, SidebarMenu, SidebarMenuButton, SidebarMenuItem, SidebarProvider } from '@/components/ui/sidebar';
 import { Link, useLocation } from 'wouter';
 import {
-  BookOpen, Building2, Coins, CreditCard, FileBarChart, Gauge,
-  Landmark, List, LogOut, NotebookPen, Scale, ShieldCheck, Users, Workflow,
+  ArrowLeftRight, BookOpen, Building2, Coins, CreditCard, FileBarChart, FileUp, Gauge,
+  Landmark, List, ListChecks, LogOut, NotebookPen, Receipt, Scale, ShieldCheck, Users, Workflow,
 } from 'lucide-react';
 import { useAuth } from '@/lib/auth';
 
@@ -35,10 +35,16 @@ const navGroups = [
   },
   {
     // One unified Banking screen: bank cards and the transaction feed they
-    // produce on the same page. Reconciliation keeps its route but is off
-    // the menu as of the 2026-09-11 hard reset ("Banking — 1 tab").
+    // produce on the same page. Reconciliation was built in Phase 1.5 but
+    // sat off the menu (deep-link only) until 2026-10-12 — it is the step
+    // that turns a categorized feed into a signed-off period, so it belongs
+    // beside the feed it checks.
     label: 'Banking',
-    items: [{ name: 'Bank Transactions', href: '/banking', icon: Landmark }],
+    items: [
+      { name: 'Bank Transactions', href: '/banking', icon: Landmark },
+      // Admin-only, matching the route guard in App.tsx and the server rule.
+      { name: 'Bank Reconciliation', href: '/banking/reconciliation', icon: ListChecks, adminOnly: true },
+    ],
   },
   {
     label: 'Accounting',
@@ -48,6 +54,9 @@ const navGroups = [
       { name: 'Trial Balance', href: '/accounting/trial-balance', icon: Scale },
       // Manual journal entries post straight to the ledger.
       { name: 'Journal Entry', href: '/accounting/journal-entry', icon: NotebookPen },
+      // QuickBooks "Transaction Detail by Account" → Draft entries → posted
+      // once reviewed (2026-10-13).
+      { name: 'Import Ledger', href: '/accounting/import', icon: FileUp },
       { name: 'Directory', href: '/accounting/contacts', icon: Users },
     ],
   },
@@ -56,6 +65,11 @@ const navGroups = [
     items: [
       { name: 'Profit & Loss', href: '/reports/profit-loss', icon: FileBarChart },
       { name: 'Balance Sheet', href: '/reports/balance-sheet', icon: CreditCard },
+      // Added 2026-10-12. Aging reads the AR/AP control accounts; the
+      // intercompany matrix is group-wide, so it is Admin-only like the
+      // server rule that backs it.
+      { name: 'A/R & A/P Aging', href: '/reports/aging', icon: Receipt },
+      { name: 'Intercompany', href: '/reports/intercompany', icon: ArrowLeftRight, adminOnly: true },
     ],
   },
   {
@@ -90,12 +104,19 @@ const ROUTE_ALIASES: Record<string, string> = {
   '/bank-transactions-hub': '/banking',
   '/accounts': '/accounting/chart-of-accounts',
   '/exchange-rates': '/settings/currency',
+  '/accounting/reconciliation': '/banking/reconciliation',
 };
 
 export function AppLayout({ children }: { children: React.ReactNode }) {
   const [location] = useLocation();
   const { user, can, logout } = useAuth();
-  const visibleGroups = navGroups.filter((g: any) => !g.adminOnly || can('admin'));
+  // Hidden both by group (Settings) and per item (a single Admin-only entry
+  // inside an otherwise open group, like Bank Reconciliation under Banking).
+  // Hiding is convenience only — the server rule table is what enforces it.
+  const visibleGroups = navGroups
+    .filter((g: any) => !g.adminOnly || can('admin'))
+    .map((g: any) => ({ ...g, items: g.items.filter((i: any) => !i.adminOnly || can('admin')) }))
+    .filter((g: any) => g.items.length > 0);
   const activeHref = ROUTE_ALIASES[location] ?? location;
 
   return (

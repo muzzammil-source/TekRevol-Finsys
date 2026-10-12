@@ -50,21 +50,27 @@ against four of them (`PK` is a cost centre, not a revenue brand).
 ```bash
 pnpm install          # install (workspace: ., packages/*, server)
 pnpm run dev:all      # API :3001 + web :5000 — normal dev loop
-pnpm run typecheck    # MUST pass before you consider a change done — currently BROKEN, see note
+pnpm run typecheck    # MUST pass before you consider a change done (frontend + hooks + server)
+pnpm run test         # unit tests (node:test via tsx) — currently the CSV import parser
 pnpm run build        # frontend → dist/public
 pnpm run start        # production (serves API + built frontend on :5000)
 ```
 
-Verification loop for any change: `pnpm run typecheck` → `pnpm run build` →
-run `dev:all` and exercise the affected screen. There is no test suite yet; adding
-one is the first item on the roadmap.
+Verification loop for any change: `pnpm run typecheck` → `pnpm run test` →
+`pnpm run build` → run `dev:all` and exercise the affected screen.
 
-> **`typecheck` cannot currently run**: `typescript` is not a dependency anywhere
-> in the workspace, and `tsconfig.json`'s `include` only covers `src/**/*` (not
-> `server/` or `packages/api-client-react`, where all the money math lives). Fix
-> this (add `typescript`, widen `include` or add a second tsconfig for the
-> backend) before trusting this gate again. Until then, rely on `build` +
-> manual verification against a running `dev:all`.
+> **The typecheck gate works as of 2026-10-13** (it was broken for months —
+> `typescript` wasn't installed and `tsconfig.json` only covered `src/**/*`).
+> It now runs twice: `tsconfig.json` for the frontend **and**
+> `packages/*/src/**` (the hook package), `tsconfig.server.json` for
+> `server/**`. Turning it on immediately found a missing import that would
+> have thrown at runtime, so keep it green.
+>
+> **Tests** are Node's built-in runner (`node:test`) through `tsx` — no test
+> framework dependency. Coverage is deliberately narrow so far: the
+> QuickBooks CSV parser (`server/qb-import.test.ts`), because it decides what
+> becomes a journal entry. Put new pure logic in a module like that one, so it
+> can be tested without booting Express or touching the database.
 
 ## 2a. Tech stack (as read from the codebase)
 

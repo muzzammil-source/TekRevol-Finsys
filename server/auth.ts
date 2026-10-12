@@ -226,11 +226,35 @@ const RULES: Rule[] = [
   // Management analytics (not in the nav) — not entity-isolated, so only
   // for users who can already see every entity.
   R("GET", /^\/api\/reports\/(brand-pnl|revenue-streams|trends)$/, "read", "allEntitiesOnly"),
+  // The intercompany matrix is inherently a group-wide view — every cell
+  // names two entities and its point is the pair reconciling — so it can
+  // only be shown to someone who may see them all.
+  R("GET", /^\/api\/reports\/intercompany-balances$/, "read", "allEntitiesOnly"),
+
+  // --- Ledger import (Phase C) ---
+  // Reading and staging a file is the `import` capability, the same one that
+  // governs bank statements. Turning a batch into the book of record is
+  // `post`, because that is what it is.
+  R("POST", /^\/api\/imports\/quickbooks\/preview$/, "import"),
+  R("POST", /^\/api\/imports\/quickbooks\/\d+\/commit$/, "import"),
+  R("GET", /^\/api\/import-batches(\/\d+)?$/, "read"),
+  R("POST", /^\/api\/import-batches\/\d+\/post$/, "post"),
+  R("POST", /^\/api\/import-batches\/\d+\/discard$/, "import"),
+
+  // --- Bank reconciliation & period locking (Phase 1.5) ---
+  // Stated explicitly as of 2026-10-12 rather than left to the catch-all:
+  // these decide when a period is signed off and locked, so who may run
+  // them should be readable here instead of inferred from the absence of a
+  // rule. The access level is unchanged (Admin, all entities) — if
+  // Bookkeepers should reconcile, this is the one line to change.
+  R(ANY, /^\/api\/reconciliations(\/.*)?$/, "admin", "allEntitiesOnly"),
+  R("GET", /^\/api\/reconciliation\/status$/, "admin", "allEntitiesOnly"),
+  R("POST", /^\/api\/reconciliation\/lock-period$/, "admin", "allEntitiesOnly"),
 
   R("GET", /^\/api\/plaid\/status$/, "read"),
-  // Everything else (legacy AP/AR, reconciliation, period locks, Plaid
-  // management, categorization rules, intercompany recharges …) falls
-  // through to the default: Admin + all entities.
+  // Everything else (legacy AP/AR, Plaid management, categorization rules,
+  // intercompany recharges …) falls through to the default: Admin + all
+  // entities.
 ];
 
 function ruleFor(method: string, path: string): Rule {

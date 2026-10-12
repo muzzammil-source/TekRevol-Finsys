@@ -6,6 +6,10 @@ import { ReportsSubNav } from '@/components/reports-nav';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Input } from '@/components/ui/input';
 import { Skeleton } from '@/components/ui/skeleton';
+// Used in the Entity column; its absence was a ReferenceError waiting for
+// anyone who opened this page with data (found by the type-check gate,
+// 2026-10-13).
+import { entityLabel } from '@/lib/constants';
 import { format } from 'date-fns';
 
 function formatMoney(amount: number, currency = 'USD') {

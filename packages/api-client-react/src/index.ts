@@ -230,19 +230,45 @@ export type Contact = {
   openingBalanceEntryId: number | null;
 };
 
-export type SubledgerItem = { contactId: number | null; contactName: string; contactType: ContactType | null; balanceUSD: number; lineCount: number; lastActivityDate: string };
+/** Aging buckets, USD. Keys are days past due, not calendar months. */
+export type AgingBuckets = { current: number; d1_30: number; d31_60: number; d61_90: number; d90_plus: number };
+export type SubledgerItem = { contactId: number | null; contactName: string; contactType: ContactType | null; balanceUSD: number; lineCount: number; lastActivityDate: string; aging: AgingBuckets };
 export type Subledger = {
   account: { id: number; code: string; name: string; type: string; category: string };
   entityId: number | null;
   asOfDate: string;
+  /** Days added to each charge's date before it counts as overdue (0 = none configured). */
+  netTermsDays: number;
   items: SubledgerItem[];
   controlBalanceUSD: number;
   itemsTotalUSD: number;
+  agingTotals: AgingBuckets;
+  /** False when the buckets don't add back to the open balance — the report says so rather than hiding it. */
+  agingReconciles: boolean;
   reconciles: boolean;
 };
 
-// AR / AP control account broken down by customer / vendor (drill-down).
-export function useSubledger(params: { accountId: number | null; entityId?: number; asOfDate?: string }) {
+export type IntercompanyCell = {
+  ownerEntityId: number; ownerName: string;
+  counterpartyEntityId: number; counterpartyName: string;
+  receivableUSD: number; payableUSD: number; netUSD: number;
+  /** What the other side's books say, which should be this cell negated. */
+  mirrorNetUSD: number; difference: number; reciprocal: boolean;
+  accounts: { accountId: number; code: string; name: string; type: string; balanceUSD: number }[];
+};
+export type IntercompanyBalances = {
+  asOfDate: string;
+  entities: { id: number; name: string; functionalCurrency: string }[];
+  cells: IntercompanyCell[];
+  mismatches: { entityAId: number; entityAName: string; entityBId: number; entityBName: string; aSaysUSD: number; bSaysUSD: number; differenceUSD: number }[];
+  groupNetUSD: number;
+  /** True when the group's intercompany positions cancel out, as they must on consolidation. */
+  eliminates: boolean;
+};
+
+// AR / AP control account broken down by customer / vendor (drill-down),
+// with aging buckets. netTermsDays shifts when a charge counts as overdue.
+export function useSubledger(params: { accountId: number | null; entityId?: number; asOfDate?: string; netTermsDays?: number }) {
   return useQuery<Subledger>({
     queryKey: ['subledger', params],
     queryFn: () => apiFetch(`/reports/subledger${qs(params)}`),
@@ -796,6 +822,76 @@ export function useGeneralLedger(
   return useQuery({
     queryKey: opts?.query?.queryKey ?? ['general-ledger', params],
     queryFn: () => apiFetch(`/reports/general-ledger${qs(params)}`),
+  });
+}
+
+// --- Ledger import (QuickBooks Transaction Detail by Account) ---
+export type ImportAccountDecision = { name: string; accountId?: number | null; create?: { type: string; subType?: string; code?: string } };
+export type ImportPreviewAccount = {
+  name: string; existingAccountId: number | null; existingCode: string | null; existingType: string | null;
+  suggestedType: string; suggestedSubType: string; confidence: 'high' | 'low';
+};
+export type ImportPreviewEntry = {
+  key: string; date: string; transactionType: string; num: string; name: string; memo: string;
+  lines: { account: string; amount: number; synthesized?: boolean }[];
+  amount: number; synthesized: boolean; sourceLines: number[]; importRowHash: string;
+  duplicateOf: { id: number; entryNumber: string; status: string } | null;
+};
+export type ImportQuarantineItem = {
+  reason: string; detail: string; date: string; num: string; name: string;
+  accounts: string[]; amount: number; sourceLines: number[];
+};
+export type ImportPreview = {
+  batchId: number; entityId: number; filename: string; rowCount: number; skippedRows: number;
+  entries: ImportPreviewEntry[]; quarantine: ImportQuarantineItem[]; accounts: ImportPreviewAccount[];
+  warnings: { line: number; message: string }[];
+  duplicateCount: number; newAccountCount: number;
+};
+export type ImportBatch = {
+  id: number; source: string; filename: string; entityId: number;
+  status: 'PREVIEW' | 'DRAFT' | 'POSTED' | 'DISCARDED';
+  rowCount: number; entryCount: number; quarantineCount: number; createdAt: string; postedAt: string | null;
+};
+
+/** Step 1: parse and show what WOULD be created. Writes no ledger rows. */
+export function usePreviewQuickBooksImport() {
+  return useMutation({
+    mutationFn: async (data: { file: File; entityId: number }): Promise<ImportPreview> => {
+      const form = new FormData();
+      form.append('file', data.file);
+      form.append('entityId', String(data.entityId));
+      return apiFetch('/imports/quickbooks/preview', { method: 'POST', body: form });
+    },
+  });
+}
+/** Step 2: create the confirmed accounts and write Draft entries. */
+export function useCommitQuickBooksImport() {
+  return useMutation({
+    mutationFn: (data: { batchId: number; accounts: ImportAccountDecision[] }) =>
+      jsonPost(`/imports/quickbooks/${data.batchId}/commit`, { accounts: data.accounts }),
+  });
+}
+/** Step 3: Draft → Posted, refused while anything is quarantined. */
+export function usePostImportBatch() {
+  return useMutation({ mutationFn: (data: { batchId: number }) => jsonPost(`/import-batches/${data.batchId}/post`) });
+}
+export function useDiscardImportBatch() {
+  return useMutation({ mutationFn: (data: { batchId: number }) => jsonPost(`/import-batches/${data.batchId}/discard`) });
+}
+export function useImportBatches(opts?: QueryOpts) {
+  return useQuery<ImportBatch[]>({
+    queryKey: ['import-batches'],
+    queryFn: () => apiFetch('/import-batches'),
+    enabled: opts?.query?.enabled ?? true,
+  });
+}
+
+/** Who owes whom across the group, as an owner × counterparty matrix. */
+export function useIntercompanyBalances(params: { asOfDate?: string }, opts?: QueryOpts) {
+  return useQuery<IntercompanyBalances>({
+    queryKey: opts?.query?.queryKey ?? ['intercompany-balances', params],
+    queryFn: () => apiFetch(`/reports/intercompany-balances${qs(params)}`),
+    enabled: opts?.query?.enabled ?? true,
   });
 }
 

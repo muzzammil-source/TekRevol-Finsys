@@ -1445,6 +1445,47 @@ _(newest entries at the top)_
 
 -->
 
+### 2026-10-13 — Phase C: typecheck gate, test harness, QuickBooks CSV importer — COMPLETED
+
+**Safety net first (the user's decision), and it earned its keep immediately**
+- `typescript@5.6.3` added to the workspace; new **`tsconfig.server.json`** covers `server/**`, and the root config now also covers `packages/*/src/**`. `pnpm run typecheck` runs both and **passes for the first time**. CLAUDE.md §2's "typecheck cannot currently run" note is replaced.
+- It found two real errors on its first run: `reports-brand-pnl.tsx` used `entityLabel` without importing it (a **ReferenceError** for anyone opening that page with data), and a `<Route component>` type mismatch. Both fixed.
+- **`pnpm run test`** — Node's built-in runner through tsx, no test-framework dependency. 15 tests over the parser (`server/qb-import.test.ts`).
+
+**The parser (`server/qb-import.ts`) is deliberately pure** — no DB, no Express, no filesystem — so it is testable alone and cannot write to the ledger by accident. Three shape facts drive it: the account is a *banner row* not a column (state machine); each transaction is printed *once per account it touches* (so rows are paired back into one entry, or the books double); and a one-sided row names its counter-account in Split **unless** that says `-SPLIT-`, which is unrecoverable. Also handles `(1,234.56)`-style negatives, trailing-minus, quoted thousands, US/ISO/`Jan 5, 2026` dates, Debit+Credit columns instead of Amount, and skips Beginning Balance / Total / TOTAL rows.
+- **Nothing is ever plugged to make an entry balance.** Unbalanced groups, unrecoverable splits and ambiguous keys (same date+type+num+payee appearing twice) go to quarantine with their source line numbers.
+- `inferAccountType()` returns a guess *with a confidence flag* — it is shown for confirmation, never applied silently, because `type` decides the sign of every report.
+
+**Schema** — `import_batches` + `journal_entries.importBatchId` / `importRowHash`, with a **partial UNIQUE index** on the hash. Re-importing is stopped by the index, not by the importer remembering to check.
+
+**Endpoints** (rules added to `RULES`): `POST /api/imports/quickbooks/preview` (`import`, writes nothing), `…/:id/commit` (`import`, writes **Draft**), `POST /api/import-batches/:id/post` (`post`, **refused while quarantineCount > 0**), `…/discard`, and the two GETs. UI at `/accounting/import` → **Import Ledger** under Accounting: upload → preview + account confirmation → Draft → post.
+
+**Verification** (isolated copy on :3095 + Vite :5052 — the live book was never opened): a 6-account fixture imported as 5 entries / 0 quarantine, including a **3-account split paired into one entry** and a one-sided row rebuilt from Split; all 5 posted, every one balanced in the DB (2/2/2/3/2 lines). Re-importing the same transactions → "ALREADY IMPORTED 2", button reads "Import 0 as Draft", and the duplicate names the existing `JE-2026-000007`. A file with an unrecoverable `-SPLIT-` and a 50.00-short pair → both quarantined with reasons and line numbers, the Post button disabled, **and the server independently returned 400** when asked to post it anyway. typecheck, test (15/15) and build all clean; test copy and temporary admin removed.
+
+**Two things to know before using it for real:**
+1. **Currency** — the file's amounts are taken as the entity's functional currency and converted at that month's configured rate (the FZCO test showed 1,250 → 337.50 USD at 0.27). Importing a USD export into an AED entity would silently rescale it. Choose the entity carefully, or add an explicit currency choice.
+2. **New accounts are created with a blank `code`**, since this report carries no account numbers. They work, but the Chart of Accounts will show them without a code until one is set.
+
+### 2026-10-12 — Phase A + B of the QuickBooks-replacement plan — COMPLETED
+Approved plan: (A) expose what already exists, (B) reporting gaps, (C) QuickBooks CSV importer — **C not started**. User decisions: age by `transactionDate` (no migration to the invoice/bill tables this phase), fix `typecheck` and write parser fixtures **before** Phase C, importer stays Draft until confirmed and quarantine-free.
+
+**Phase A — surfaced the reconciliation module that already existed**
+- `Bank Reconciliation` added to the Banking nav group (`src/components/layout.tsx`), Admin-only. The page, its 9 endpoints and the zero-variance gate have existed since Phase 1.5 but were deep-link only, and `reconciliations` still has **0 rows** — it has never been run against real data.
+- Nav items now support a per-item `adminOnly`, not only per group, and `/accounting/reconciliation` aliases to the Banking entry so the old deep link highlights correctly.
+- `server/auth.ts`: `/api/reconciliations/*`, `/api/reconciliation/status` and `/lock-period` now have **explicit** rules instead of falling through to the deny-by-default catch-all. Access is unchanged (Admin + all entities) — deliberately not widened to Bookkeeper, which is a product decision, but it is now a one-line change if wanted.
+
+**Phase B — reporting gaps**
+- **Aging on `/api/reports/subledger`**: each item gains `aging { current, d1_30, d31_60, d61_90, d90_plus }`, plus `agingTotals` and `agingReconciles`. Payments are applied **oldest charge first (FIFO)**; ageing the net balance instead would let a recent payment make a year-old debt look current. Optional `netTermsDays` (default 0) shifts the due date — with no terms configured, "Current" means dated today or later. Over-payments land in Current as unapplied credits, as QuickBooks shows them.
+- **`GET /api/reports/intercompany-balances`** (new): owner × counterparty matrix from the `Intercompany Clearing` heads, each cell carrying the counter-cell and the gap between them, plus a group-wide elimination check.
+  - **Bug caught by that check during verification:** the first implementation flipped the sign for liabilities (`type === 'Asset' ? net : -net`), so both sides of every pair claimed to be owed and the group failed to eliminate by $9,275.70. Debits − credits already reads as "positive = owed" for both sides; the flip was removed. Keep the reciprocity check — it is what made a silent sign error visible.
+- **General Ledger is now a QuickBooks "Transaction Detail by Account"**: Date / Type / Num / Name / Memo-Description / **Split** / Debit / Credit / Balance. `splitAccounts[]` (the entry's other accounts) and `transactionType` (from `journal_entries.source`) were added to the GL endpoint; one other account shows its name, several show `-SPLIT-`. Storage key bumped to `finsys.gl.columns.v2`.
+- New pages `src/pages/reports-aging.tsx` and `src/pages/reports-intercompany.tsx` with nav entries under Reports (Intercompany is Admin-only, matching its `allEntitiesOnly` server rule).
+- **No schema change in Phase B** — every figure is derived from `journal_lines` on read. The `is_reconciled` / `reconciliation_date` columns from the original request were deliberately **not** added: that state already lives in `reconciliation_matches` + `reconciliations.status`, and a second copy would be a second source of truth (CLAUDE.md rules 1 and 3).
+
+**Verification** (isolated copy of the database on :3096 + Vite :5051 — never the live book): intercompany → `eliminates=true`, groupNet 0.00, 4 cells all reciprocal (CA owed 9.14 by FZCO; TX owed 4,610.45 by CA). Aging → seeded a fixture (1,000 on 2026-06-01, 500 on 09-15, 200 on 10-10, 300 payment on 09-20) and got exactly the hand-computed answer: terms 0 → 1–30 = 700, 90+ = 700, total 1,400; terms 30 → Current = 700, 90+ = 700; `agingReconciles` true both ways, which is what proves FIFO rather than net-balance ageing. GL → headers and `-SPLIT-` confirmed on the 3-way entry, no overflow at 1440px. Reconciliation page loads and `/api/reconciliations` returns 200 under the new rule. Build clean; test copy, fixture and temporary admin all removed; live database verified back to one user.
+
+**Caveat for Phase C:** `add-verifier.cjs` in the scratchpad ignores its argument and always writes to the **real** `server/finance.db` — it put a test admin in the live book during this session (removed immediately). Fix the script or inline the path before reusing it.
+
 ### 2026-10-12 — Password reset by email (+ SMTP) — COMPLETED
 - **New table `password_resets`** (tokenHash PK, userId FK ON DELETE CASCADE, expiresAt, createdAt, usedAt) created in the same idempotent `db.exec` block as `sessions`. Only the SHA-256 of the token is stored — the email holds the only copy, matching how sessions already work.
 - **Two public endpoints** (`server/auth.ts`, rule added to `RULES` as required): `POST /api/auth/forgot-password` and `POST /api/auth/reset-password`.
