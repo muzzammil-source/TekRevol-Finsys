@@ -7,16 +7,27 @@
 node_modules/
 dist/
 
-# Local development database (2026-10-13).
-# server/finance.db is still TRACKED on purpose: with no volume attached to
-# the deployment, the committed copy is the only database the container
-# gets, so it is the production snapshot. Development therefore runs against
-# its own file (DB_PATH=finance.dev.db in .env), so day-to-day local work
-# never touches that snapshot and "refresh the snapshot from production"
-# stays a deliberate, visible act.
-*.dev.db
-*.dev.db-wal
-*.dev.db-shm
+# SQLite databases (2026-10-20)
+#
+# The books are live data, not source. They used to be committed, which meant
+# every deploy rebuilt the container from git and replaced the production
+# database with whatever was last committed — losing everything entered
+# since. Production now keeps its database on a Railway volume mounted at
+# /data (DB_PATH=/data/finance.db), so deploys cannot reach it.
+#
+# Locally the server opens server/finance.dev.db, which it creates on first
+# boot because the schema is built idempotently at startup. Nothing here is
+# ever committed again.
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+server/finance.db
+# Hand-made safety copies (server/finance.db.backup-…, .bak-…)
+*.db.backup-*
+*.db.bak-*
 # Databases pulled down from the deployment for inspection.
 prod-finance.db*
 *.b64
