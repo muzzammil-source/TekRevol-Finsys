@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useState } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -22,7 +22,7 @@ import JournalEntry from "@/pages/journal-entry";
 import SplitRules from "@/pages/split-rules";
 import SettingsEntities from "@/pages/settings-entities";
 import TeamAccess from "@/pages/settings-team";
-import { LoginScreen, SetupScreen, ChangePasswordScreen } from "@/pages/auth-screens";
+import { LoginScreen, SetupScreen, ChangePasswordScreen, ResetPasswordScreen } from "@/pages/auth-screens";
 import { AuthProvider, NoAccess, useAuth, useAuthEventListener } from "@/lib/auth";
 import { useAuthStatus, useMe } from "@workspace/api-client-react";
 
@@ -108,6 +108,15 @@ function AuthGate() {
   useAuthEventListener();
   const status = useAuthStatus();
   const me = useMe();
+
+  // A reset link lands here signed out, so it has to be answered before the
+  // sign-in screen gets a say — and before the loading gate, since it needs
+  // no session of its own. Read once: the token is stripped from the URL on
+  // success, and re-reading it would unmount the screen mid-flight.
+  const [resetToken] = useState(() => new URLSearchParams(window.location.search).get('token') || '');
+  if (resetToken && window.location.pathname.replace(/\/$/, '').endsWith('/reset-password')) {
+    return <ResetPasswordScreen token={resetToken} />;
+  }
 
   if (status.isLoading || me.isLoading) {
     return <div className="flex min-h-screen items-center justify-center text-sm text-gray-400">Loading…</div>;

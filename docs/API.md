@@ -17,6 +17,8 @@ Errors: `401 {code:"UNAUTHENTICATED"}`, `403 {code:"FORBIDDEN"|"ENTITY_FORBIDDEN
 | POST | `/api/auth/logout` | — | Ends the session |
 | GET | `/api/auth/me` | — | `{ user, capabilities[] }` (allowed while a temporary password is pending) |
 | POST | `/api/auth/change-password` | `{ currentPassword, newPassword }` | Clears the temporary flag; signs out other sessions |
+| POST | `/api/auth/forgot-password` | `{ email }` | Public. Emails a one-hour, single-use reset link. Always `{ ok: true }` — never reveals whether the address exists. 5 per email+IP per 15 min. Without SMTP configured the link is logged to the server console instead |
+| POST | `/api/auth/reset-password` | `{ token, password }` | Public. Consumes the token, applies the password policy, ends every session for that user, then signs in with a fresh one. 400 if the token is unknown, used or expired |
 | GET/POST | `/api/users` | `{ fullName, email, password, role, allEntities, entityIds[] }` | Admin only |
 | PUT | `/api/users/:id` | `{ fullName?, email?, role?, allEntities?, entityIds?, status? }` | Admin only; can't demote/disable the last active Admin or disable yourself |
 | POST | `/api/users/:id/reset-password` | `{ password }` | Admin only; forces a change at next sign-in, ends sessions |

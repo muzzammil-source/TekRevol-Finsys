@@ -91,6 +91,14 @@ export function useLogout() {
 export function useChangePassword() {
   return useMutation({ mutationFn: (data: { currentPassword: string; newPassword: string }) => jsonPost('/auth/change-password', data) });
 }
+/** Always resolves, whether or not the address has an account — by design. */
+export function useRequestPasswordReset() {
+  return useMutation({ mutationFn: (data: { email: string }) => jsonPost('/auth/forgot-password', data) });
+}
+/** Consumes a reset token and signs the user in with the new password. */
+export function useResetPassword() {
+  return useMutation({ mutationFn: (data: { token: string; password: string }) => jsonPost('/auth/reset-password', data) });
+}
 
 export const getListUsersQueryKey = () => ['users'];
 export function useListUsers(opts?: QueryOpts) {

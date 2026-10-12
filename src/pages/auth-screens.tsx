@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
-import { useBootstrapAdmin, useChangePassword, useLogin, useLogout } from '@workspace/api-client-react';
+import { useBootstrapAdmin, useChangePassword, useLogin, useLogout, useRequestPasswordReset, useResetPassword } from '@workspace/api-client-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { resetSessionQueries } from '@/lib/auth';
@@ -43,6 +43,11 @@ export function LoginScreen() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
+  const [forgot, setForgot] = useState(false);
+
+  // The email already typed carries over to the reset form, so nobody has
+  // to type it twice.
+  if (forgot) return <ForgotPasswordScreen initialEmail={email} onBack={() => setForgot(false)} />;
 
   const submit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -62,6 +67,94 @@ export function LoginScreen() {
         <Button type="submit" className="w-full" disabled={login.isPending || !email || !password}>
           {login.isPending ? 'Signing in…' : 'Sign in'}
         </Button>
+        <button
+          type="button"
+          className="w-full text-center text-xs text-gray-500 hover:underline"
+          onClick={() => setForgot(true)}
+        >
+          Forgot password?
+        </button>
+      </form>
+    </AuthCard>
+  );
+}
+
+export function ForgotPasswordScreen({ initialEmail = '', onBack }: { initialEmail?: string; onBack: () => void }) {
+  const request = useRequestPasswordReset();
+  const [email, setEmail] = useState(initialEmail);
+  const [sent, setSent] = useState(false);
+
+  const submit = (e: React.FormEvent) => {
+    e.preventDefault();
+    // The server answers the same way for a known and an unknown address,
+    // so the screen does too — anything else would reveal who has an
+    // account here.
+    request.mutate({ email }, { onSettled: () => setSent(true) });
+  };
+
+  if (sent) {
+    return (
+      <AuthCard title="Check your email" subtitle={`If an account exists for ${email}, a link to choose a new password is on its way. It expires in an hour.`}>
+        <Button type="button" variant="outline" className="w-full" onClick={onBack}>Back to sign in</Button>
+      </AuthCard>
+    );
+  }
+
+  return (
+    <AuthCard title="Reset your password" subtitle="Enter the email you sign in with and we'll send you a link to choose a new password.">
+      <form onSubmit={submit} className="space-y-3">
+        <Field label="Email" type="email" autoComplete="username" value={email} onChange={(e) => setEmail(e.target.value)} autoFocus required />
+        <Button type="submit" className="w-full" disabled={request.isPending || !email}>
+          {request.isPending ? 'Sending…' : 'Send reset link'}
+        </Button>
+        <button type="button" className="w-full text-center text-xs text-gray-500 hover:underline" onClick={onBack}>
+          Back to sign in
+        </button>
+      </form>
+    </AuthCard>
+  );
+}
+
+export function ResetPasswordScreen({ token }: { token: string }) {
+  const queryClient = useQueryClient();
+  const reset = useResetPassword();
+  const [password, setPassword] = useState('');
+  const [confirm, setConfirm] = useState('');
+  const [error, setError] = useState<string | null>(null);
+
+  const submit = (e: React.FormEvent) => {
+    e.preventDefault();
+    setError(null);
+    if (password !== confirm) return setError('Passwords do not match');
+    reset.mutate({ token, password }, {
+      onSuccess: () => {
+        // A successful reset signs the user in, so drop the token from the
+        // address bar before the app renders — it's spent, and it has no
+        // business sitting in history or a shared screenshot.
+        window.history.replaceState({}, '', import.meta.env.BASE_URL || '/');
+        resetSessionQueries(queryClient);
+      },
+      onError: (err: any) => setError(err.message),
+    });
+  };
+
+  return (
+    <AuthCard title="Choose a new password" subtitle="This link works once. After saving you'll be signed in.">
+      <form onSubmit={submit} className="space-y-3">
+        <Field label="New password" type="password" autoComplete="new-password" value={password} onChange={(e) => setPassword(e.target.value)} autoFocus required />
+        <Field label="Confirm new password" type="password" autoComplete="new-password" value={confirm} onChange={(e) => setConfirm(e.target.value)} required />
+        <p className="text-[11px] text-gray-500">{PASSWORD_HINT}</p>
+        {error && <div role="alert" className="text-xs text-red-700">{error}</div>}
+        <Button type="submit" className="w-full" disabled={reset.isPending || !password}>
+          {reset.isPending ? 'Saving…' : 'Save password & sign in'}
+        </Button>
+        <button
+          type="button"
+          className="w-full text-center text-xs text-gray-500 hover:underline"
+          onClick={() => { window.location.href = import.meta.env.BASE_URL || '/'; }}
+        >
+          Back to sign in
+        </button>
       </form>
     </AuthCard>
   );

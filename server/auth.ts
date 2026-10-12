@@ -19,6 +19,7 @@
 //      exported below.
 
 import crypto from "crypto";
+import { sendPasswordResetEmail } from "./mailer";
 import type { Express, NextFunction, Request, Response } from "express";
 import type BetterSqlite3 from "better-sqlite3";
 
@@ -167,6 +168,9 @@ const RULES: Rule[] = [
   // --- auth ---
   R("GET", /^\/api\/auth\/status$/, "public"),
   R("POST", /^\/api\/auth\/(login|bootstrap)$/, "public"),
+  // Public by necessity: someone who can't sign in has to be able to ask
+  // for a link, and the link itself is the only credential on the reset.
+  R("POST", /^\/api\/auth\/(forgot-password|reset-password)$/, "public"),
   R("GET", /^\/api\/auth\/me$/, "session"),
   R("POST", /^\/api\/auth\/(logout|change-password)$/, "session"),
   R(ANY, /^\/api\/users(\/.*)?$/, "admin", "allEntitiesOnly"),
@@ -245,6 +249,22 @@ const SESSION_TTL_MS = 12 * 60 * 60 * 1000; // 12h, sliding
 const SESSION_REFRESH_MS = 30 * 60 * 1000; // extend at most every 30 min
 const LOGIN_MAX_FAILURES = 5;
 const LOGIN_LOCK_MS = 15 * 60 * 1000;
+// Short-lived on purpose: the link is a bearer credential sitting in an inbox.
+const RESET_TTL_MS = 60 * 60 * 1000; // 1h
+const RESET_MAX_REQUESTS = 5;
+const RESET_THROTTLE_MS = 15 * 60 * 1000;
+
+/**
+ * Where the reset link should point. APP_BASE_URL wins (set it in
+ * production); otherwise the request's own origin is used, which keeps
+ * localhost and preview deployments working without configuration.
+ */
+function appBaseUrl(req: Request): string {
+  const configured = String(process.env.APP_BASE_URL || "").trim().replace(/\/$/, "");
+  if (configured) return configured;
+  const proto = req.headers["x-forwarded-proto"] || (req.secure ? "https" : "http");
+  return `${proto}://${req.headers.host}`;
+}
 
 export function createAuth(db: BetterSqlite3.Database) {
   db.exec(`
@@ -277,6 +297,17 @@ export function createAuth(db: BetterSqlite3.Database) {
       userAgent TEXT DEFAULT ''
     );
     CREATE INDEX IF NOT EXISTS ix_sessions_user ON sessions (userId);
+    -- Password-reset links. Like sessions, only a SHA-256 of the token is
+    -- stored: the email carries the only copy, so a leaked database can't
+    -- be used to seize an account.
+    CREATE TABLE IF NOT EXISTS password_resets (
+      tokenHash TEXT PRIMARY KEY,
+      userId INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      expiresAt INTEGER NOT NULL,
+      createdAt INTEGER NOT NULL,
+      usedAt INTEGER DEFAULT NULL
+    );
+    CREATE INDEX IF NOT EXISTS ix_password_resets_user ON password_resets (userId);
   `);
 
   const sha256 = (s: string) => crypto.createHash("sha256").update(s).digest("hex");
@@ -475,6 +506,72 @@ export function createAuth(db: BetterSqlite3.Database) {
       failures.delete(key);
       createSession(req, res, u.id);
       res.json({ user: publicUser(u) });
+    });
+
+    // ---- password reset by email ----
+    // Both routes answer the same way whether or not the address is known:
+    // the login route already refuses to confirm which emails exist, and a
+    // reset form that leaks it would undo that.
+    app.post("/api/auth/forgot-password", async (req, res) => {
+      const email = normalizeEmail(req.body?.email);
+      const key = `reset|${throttleKey(req, email)}`;
+      const now = Date.now();
+      const f = failures.get(key);
+      // Rate-limited per email+IP so the form can't be used to flood an
+      // inbox (or burn the mail quota). Still answers 200 when throttled.
+      if (!(f && f.lockedUntil > now)) {
+        const next = f && now - f.first < RESET_THROTTLE_MS ? { ...f, count: f.count + 1 } : { count: 1, first: now, lockedUntil: 0 };
+        if (next.count >= RESET_MAX_REQUESTS) next.lockedUntil = now + RESET_THROTTLE_MS;
+        failures.set(key, next);
+
+        const u = db.prepare("SELECT * FROM users WHERE lower(email) = ?").get(email) as any;
+        if (u && u.status === "Active") {
+          const token = crypto.randomBytes(32).toString("base64url");
+          db.transaction(() => {
+            // One live link per account: asking again retires the previous.
+            db.prepare("DELETE FROM password_resets WHERE userId = ? AND usedAt IS NULL").run(u.id);
+            db.prepare("INSERT INTO password_resets (tokenHash, userId, expiresAt, createdAt) VALUES (?, ?, ?, ?)")
+              .run(sha256(token), u.id, now + RESET_TTL_MS, now);
+          })();
+          const link = `${appBaseUrl(req)}/reset-password?token=${token}`;
+          const minutes = Math.round(RESET_TTL_MS / 60000);
+          try {
+            const sent = await sendPasswordResetEmail(u.email, u.fullName, link, minutes);
+            // No SMTP configured (local dev): the link goes to the server
+            // log so the flow is still usable end to end.
+            if (!sent) console.log(`[auth] password reset for ${u.email} (no SMTP configured): ${link}`);
+          } catch (err: any) {
+            // Never surfaced to the caller — that would confirm the address.
+            console.error(`[auth] could not send the reset email for ${u.email}:`, err?.message || err);
+          }
+        }
+      }
+      res.json({ ok: true });
+    });
+
+    app.post("/api/auth/reset-password", (req, res) => {
+      const token = String(req.body?.token ?? "");
+      const password = String(req.body?.password ?? "");
+      const row = token ? (db.prepare("SELECT * FROM password_resets WHERE tokenHash = ?").get(sha256(token)) as any) : null;
+      const now = Date.now();
+      if (!row || row.usedAt || row.expiresAt <= now) {
+        return res.status(400).json({ error: "This reset link has expired or has already been used — request a new one." });
+      }
+      const problem = passwordProblem(password);
+      if (problem) return res.status(400).json({ error: problem });
+      const u = userRow(row.userId);
+      if (!u || u.status !== "Active") return res.status(400).json({ error: "This account is not active" });
+      db.transaction(() => {
+        db.prepare("UPDATE users SET passwordHash = ?, mustChangePassword = 0 WHERE id = ?").run(hashPassword(password), u.id);
+        db.prepare("UPDATE password_resets SET usedAt = ? WHERE tokenHash = ?").run(now, row.tokenHash);
+        db.prepare("DELETE FROM password_resets WHERE userId = ? AND usedAt IS NULL").run(u.id);
+        // Whoever was signed in as this user is signed out: a reset is also
+        // how someone takes an account back.
+        db.prepare("DELETE FROM sessions WHERE userId = ?").run(u.id);
+      })();
+      // Control of the mailbox was just proven, so sign them straight in.
+      createSession(req, res, u.id);
+      res.json({ user: publicUser(userRow(u.id)) });
     });
 
     app.post("/api/auth/logout", (req, res) => {
