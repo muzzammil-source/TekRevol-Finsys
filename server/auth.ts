@@ -255,13 +255,23 @@ const RESET_MAX_REQUESTS = 5;
 const RESET_THROTTLE_MS = 15 * 60 * 1000;
 
 /**
- * Where the reset link should point. APP_BASE_URL wins (set it in
- * production); otherwise the request's own origin is used, which keeps
- * localhost and preview deployments working without configuration.
+ * Where the reset link should point.
+ *
+ * APP_BASE_URL wins and is what production should set: a link built from
+ * request headers can be aimed somewhere else by whoever sends the request
+ * (classic host-header injection), and this link carries a token that
+ * resets an account.
+ *
+ * Falling back to headers keeps local dev working unconfigured, but it
+ * prefers the browser's Origin over Host — in dev the API sits behind
+ * Vite's proxy, so Host is the API's own port (3001) while Origin is the
+ * address the person actually has open (5000).
  */
 function appBaseUrl(req: Request): string {
   const configured = String(process.env.APP_BASE_URL || "").trim().replace(/\/$/, "");
   if (configured) return configured;
+  const origin = String(req.headers.origin || "").trim().replace(/\/$/, "");
+  if (/^https?:\/\//.test(origin)) return origin;
   const proto = req.headers["x-forwarded-proto"] || (req.secure ? "https" : "http");
   return `${proto}://${req.headers.host}`;
 }
