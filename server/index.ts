@@ -57,7 +57,16 @@ for (const envFile of [path.join(__dirname, ".env"), path.join(__dirname, "..", 
   if (count > 0) console.log(`[env] loaded ${count} variable(s) from ${envFile}`);
 }
 
-const db = new Database(path.join(__dirname, "finance.db"));
+// The database file. DB_PATH points it outside the checkout — which is how
+// a deployment keeps its books: the container is rebuilt from git on every
+// deploy, so a database sitting inside the repo is replaced each time.
+// Point DB_PATH at a mounted volume (e.g. /data/finance.db) and the data
+// survives. Unset, it stays beside the server, which is what local
+// development wants.
+const DB_PATH = String(process.env.DB_PATH || "").trim() || path.join(__dirname, "finance.db");
+fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
+console.log(`[db] ${DB_PATH}`);
+const db = new Database(DB_PATH);
 db.pragma("journal_mode = WAL");
 db.pragma("foreign_keys = ON");
 
