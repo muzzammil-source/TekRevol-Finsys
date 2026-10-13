@@ -7,6 +7,20 @@
 node_modules/
 dist/
 
+# Local development database (2026-10-13).
+# server/finance.db is still TRACKED on purpose: with no volume attached to
+# the deployment, the committed copy is the only database the container
+# gets, so it is the production snapshot. Development therefore runs against
+# its own file (DB_PATH=finance.dev.db in .env), so day-to-day local work
+# never touches that snapshot and "refresh the snapshot from production"
+# stays a deliberate, visible act.
+*.dev.db
+*.dev.db-wal
+*.dev.db-shm
+# Databases pulled down from the deployment for inspection.
+prod-finance.db*
+*.b64
+
 # Compiled Java class files
 *.class
 

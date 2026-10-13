@@ -65,7 +65,14 @@ for (const envFile of [path.join(__dirname, ".env"), path.join(__dirname, "..", 
 // survives. Unset, it stays beside the server, which is what local
 // development wants.
 const LEGACY_DB_PATH = path.join(__dirname, "finance.db");
-const DB_PATH = String(process.env.DB_PATH || "").trim() || LEGACY_DB_PATH;
+// A relative DB_PATH is resolved against the server directory, not the
+// working directory — `pnpm run dev:api` runs from the repo root while the
+// server is sometimes started from server/, and the database must not move
+// depending on which one was used.
+const configuredDbPath = String(process.env.DB_PATH || "").trim();
+const DB_PATH = configuredDbPath
+  ? (path.isAbsolute(configuredDbPath) ? configuredDbPath : path.join(__dirname, configuredDbPath))
+  : LEGACY_DB_PATH;
 fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
 
 // One-time migration onto a volume (2026-10-13). The first boot after
