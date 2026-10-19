@@ -1445,6 +1445,21 @@ _(newest entries at the top)_
 
 -->
 
+### 2026-10-20 — Production data persistence — SOLVED (volume attached)
+
+The deploy-overwrites-production problem that ran through the whole of October is **closed**. A Railway volume is mounted at `/data` on `@workspace/server` (`railway volume add --mount-path /data`, done from the CLI — no dashboard clicking needed, which is worth remembering), and `DB_PATH=/data/finance.db` is set. The redeploy logged exactly what it should:
+
+```
+[db] seeded /data/finance.db from the committed snapshot (first boot on this file)
+[db] /data/finance.db
+```
+
+so the existing books moved onto the volume and production now runs from it. Deploys cannot touch it: the volume is not part of the image. Cost ~$0.16/GB-month against the $5 Hobby credits; 0.3 MB used of 5 GB.
+
+**Left to do:** `server/finance.db` is still committed as a now-unread snapshot. The commit removing it is parked on `chore/untrack-db-pending-volume` and is **safe to push now** — the volume holds the data and the seed step no longer runs (it only fires when the target is missing). After that, a fresh clone starts empty at the first-run admin screen, which is correct.
+
+**Also worth knowing:** `railway ssh` and `railway volume files` both need an SSH key registered with the CLI (`ssh-keygen -t ed25519`), which this machine doesn't have — that is why `scripts/sync-prod-db.mjs` could not run. `railway logs --deployment` needs no key and was how the seeding was verified.
+
 ### 2026-10-20 — Why manual data kept disappearing — INVESTIGATED & FIXED (except the deploy, which needs a volume)
 
 Asked to find why manually entered transactions/uploads were being lost. **Three separate causes**, two already fixed, one still open:

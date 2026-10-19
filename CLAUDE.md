@@ -192,21 +192,26 @@ yet. Do not add features that assume it is.
 - **No budgets, no variance analysis.** The requirement exists; the module does not.
 - **Bank reconciliation is partial.** Transactions can be fetched and reviewed
   (pending / posted / excluded) but are never matched to expense records.
-- **`server/finance.db` is committed to git — on purpose, for now (2026-10-20).**
-  The deployment has no volume attached, so its filesystem is rebuilt from git
-  on every deploy: the committed copy is the only database production ever
-  gets. That has a cost — live financial data and password hashes live in the
-  repository, and **anything entered on the live site is lost on the next
-  deploy** unless captured first with `node scripts/sync-prod-db.mjs`.
-  - **Development never touches that file.** With `DB_PATH` unset, a
-    non-production server opens `server/finance.dev.db` (gitignored, seeded
-    from the committed snapshot on first boot). This is what stops an
-    ordinary `git checkout`/`pull`/`reset` from silently replacing local work
-    — which is exactly what used to happen.
-  - **The real fix** is a Railway volume + `DB_PATH=/data/finance.db`; the
-    server already copies the existing books onto an empty volume on first
-    boot. The commit that removes the database from git is written and parked
-    on the `chore/untrack-db-pending-volume` branch, waiting for that volume.
+- **Where the database lives (settled 2026-10-20).** Production keeps its books
+  on a **Railway volume** mounted at `/data`, with `DB_PATH=/data/finance.db`.
+  The volume is not part of the image, so a deploy cannot touch it — the log
+  line `[db] seeded /data/finance.db from the committed snapshot (first boot
+  on this file)` records the one-time copy that moved the books there.
+  Deploys no longer reset live data.
+  - **Development** uses `server/finance.dev.db` (gitignored) — the default
+    whenever `NODE_ENV` isn't `production`, so a fresh clone is safe without
+    any configuration. Before this, dev wrote to the tracked `finance.db`
+    and an ordinary `git checkout`/`pull`/`reset` silently replaced whatever
+    had been entered locally.
+  - **`server/finance.db` is still committed**, now only as a historical
+    snapshot nothing reads. The commit removing it from git is written and
+    parked on `chore/untrack-db-pending-volume`; pushing it is safe now that
+    the volume holds the books. Note that once it is gone, a fresh clone
+    starts from an empty database and the first-run admin screen, which is
+    the correct behaviour.
+  - `scripts/sync-prod-db.mjs` pulled production's database down when the
+    deploy-overwrite problem existed. It is no longer part of any routine,
+    and needs an SSH key registered with the Railway CLI to run at all.
 - **Plaid is optional.** Without `PLAID_CLIENT_ID`/`PLAID_SECRET` the bank screen
   still works using manual bank profiles and uploaded statements.
 
