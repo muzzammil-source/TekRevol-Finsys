@@ -58,43 +58,52 @@ for (const envFile of [path.join(__dirname, ".env"), path.join(__dirname, "..", 
   if (count > 0) console.log(`[env] loaded ${count} variable(s) from ${envFile}`);
 }
 
-// The database file. DB_PATH points it outside the checkout — which is how
-// a deployment keeps its books: the container is rebuilt from git on every
-// deploy, so a database sitting inside the repo is replaced each time.
-// Point DB_PATH at a mounted volume (e.g. /data/finance.db) and the data
-// survives. Unset, it stays beside the server, which is what local
-// development wants.
+// Which database file this process opens.
+//
+//   DB_PATH set            → that file (relative paths resolve against this
+//                            directory, so it does not move depending on
+//                            whether the server was started from the repo
+//                            root or from server/). Point it at a mounted
+//                            volume in a deployment: the container is
+//                            rebuilt from git on every deploy, so a
+//                            database inside the repo is replaced each time.
+//   unset, production      → server/finance.db, the committed snapshot.
+//   unset, development     → server/finance.dev.db, which is gitignored.
+//
+// That last default matters (2026-10-20). server/finance.db is a TRACKED
+// file: while development wrote to it, any ordinary git operation —
+// checkout, reset, pull, stash — silently replaced whatever had been
+// entered locally with the committed copy. Defaulting development onto its
+// own file makes that impossible by construction rather than by remembering
+// to set DB_PATH, so a fresh clone is safe before anyone reads the docs.
 const LEGACY_DB_PATH = path.join(__dirname, "finance.db");
-// A relative DB_PATH is resolved against the server directory, not the
-// working directory — `pnpm run dev:api` runs from the repo root while the
-// server is sometimes started from server/, and the database must not move
-// depending on which one was used.
+const DEV_DB_PATH = path.join(__dirname, "finance.dev.db");
+const IS_PRODUCTION = process.env.NODE_ENV === "production";
 const configuredDbPath = String(process.env.DB_PATH || "").trim();
 const DB_PATH = configuredDbPath
   ? (path.isAbsolute(configuredDbPath) ? configuredDbPath : path.join(__dirname, configuredDbPath))
-  : LEGACY_DB_PATH;
+  : (IS_PRODUCTION ? LEGACY_DB_PATH : DEV_DB_PATH);
 fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
 
-// One-time migration onto a volume (2026-10-13). The first boot after
-// DB_PATH is pointed at a mounted volume finds it empty, while the old
-// database is still sitting in the image next to the server — so it is
-// copied across rather than silently starting an empty set of books. The
-// WAL and shared-memory files come too: a database copied without its WAL
-// loses whatever had not been checkpointed.
+// First boot on a new database file: copy the committed snapshot across
+// rather than silently starting an empty set of books. This covers both
+// cases — a deployment whose volume is still empty (2026-10-13), and a
+// fresh clone starting its own development database (2026-10-20).
 //
-// This runs only when the target does not exist, so it never overwrites a
-// volume that already holds the books. Once the database stops being
-// committed to git the legacy file disappears from the image and this
-// becomes a no-op — which is the point: it exists to carry the data across
-// that one deploy.
+// The WAL and shared-memory files come too: a database copied without its
+// WAL is missing whatever had not been checkpointed.
+//
+// It runs only when the target does not exist, so it can never overwrite a
+// database that already holds data, and it becomes a no-op once the
+// snapshot is no longer committed.
 if (DB_PATH !== LEGACY_DB_PATH && !fs.existsSync(DB_PATH) && fs.existsSync(LEGACY_DB_PATH)) {
   try {
     for (const suffix of ["", "-wal", "-shm"]) {
       if (fs.existsSync(LEGACY_DB_PATH + suffix)) fs.copyFileSync(LEGACY_DB_PATH + suffix, DB_PATH + suffix);
     }
-    console.log(`[db] seeded ${DB_PATH} from ${LEGACY_DB_PATH} (first boot on this volume)`);
+    console.log(`[db] seeded ${DB_PATH} from the committed snapshot (first boot on this file)`);
   } catch (e) {
-    console.error("[db] could not seed the database onto the volume:", e);
+    console.error("[db] could not seed the database:", e);
   }
 }
 console.log(`[db] ${DB_PATH}`);

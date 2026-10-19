@@ -192,9 +192,21 @@ yet. Do not add features that assume it is.
 - **No budgets, no variance analysis.** The requirement exists; the module does not.
 - **Bank reconciliation is partial.** Transactions can be fetched and reviewed
   (pending / posted / excluded) but are never matched to expense records.
-- **`server/finance.db` is committed to git.** Convenient for handoff, wrong for
-  the long run: it will conflict on merge and it puts live financial data in the
-  repository. Move to a seed script plus an ignored working database.
+- **`server/finance.db` is committed to git — on purpose, for now (2026-10-20).**
+  The deployment has no volume attached, so its filesystem is rebuilt from git
+  on every deploy: the committed copy is the only database production ever
+  gets. That has a cost — live financial data and password hashes live in the
+  repository, and **anything entered on the live site is lost on the next
+  deploy** unless captured first with `node scripts/sync-prod-db.mjs`.
+  - **Development never touches that file.** With `DB_PATH` unset, a
+    non-production server opens `server/finance.dev.db` (gitignored, seeded
+    from the committed snapshot on first boot). This is what stops an
+    ordinary `git checkout`/`pull`/`reset` from silently replacing local work
+    — which is exactly what used to happen.
+  - **The real fix** is a Railway volume + `DB_PATH=/data/finance.db`; the
+    server already copies the existing books onto an empty volume on first
+    boot. The commit that removes the database from git is written and parked
+    on the `chore/untrack-db-pending-volume` branch, waiting for that volume.
 - **Plaid is optional.** Without `PLAID_CLIENT_ID`/`PLAID_SECRET` the bank screen
   still works using manual bank profiles and uploaded statements.
 

@@ -1445,6 +1445,16 @@ _(newest entries at the top)_
 
 -->
 
+### 2026-10-20 — Why manual data kept disappearing — INVESTIGATED & FIXED (except the deploy, which needs a volume)
+
+Asked to find why manually entered transactions/uploads were being lost. **Three separate causes**, two already fixed, one still open:
+
+1. **A tracked database used as the development database** (the live one here). `server/finance.db` is committed, so *any* git operation that restores tracked files — `checkout`, `reset`, `pull`, `stash` — silently replaced whatever had been entered locally with the committed copy. This is almost certainly what the user kept hitting. Fixed on 2026-10-13 by splitting dev onto `finance.dev.db`, and **hardened today**: with `DB_PATH` unset a non-production server now defaults to `server/finance.dev.db` (gitignored, seeded from the snapshot on first boot). Protection no longer depends on `.env` being present, so a fresh clone is safe before anyone reads the docs. Production (`NODE_ENV=production`) still opens the committed `finance.db`.
+2. **A boot-time seed that resurrected deleted rows** — `seedPhase1Schema()` re-inserted five entities, their brands and ~30 accounts whenever any was missing, which is what once replaced the user's imported "WF"/"Chase Bank" heads at codes 1000/1001. Already unwired from the boot path by an earlier session; verified still unwired today (the function is left in the file as documentation, with a "do NOT wire it back" note).
+3. **Deploys overwrite production** — still true and unfixable without a volume: the container is rebuilt from git, so the committed snapshot replaces whatever is live. `scripts/sync-prod-db.mjs` captures production first; the untracking commit stays parked on `chore/untrack-db-pending-volume`.
+
+Also verified today: no ORM and no migration tool (so nothing auto-resets), no `seed`/`reset`/`migrate` npm scripts, and the only remaining boot-time mutations are two narrow guarded statements (the COGS re-category, which only touches rows still at their seeded value, and the demo-Plaid-feed delete). Empirically confirmed that `git checkout HEAD -- .` leaves `finance.dev.db` byte-identical. Volume pricing checked while we were at it: ~$0.16/GB-month, allowed even on the Free plan — cost is not the blocker.
+
 ### 2026-10-13 — Phase C: typecheck gate, test harness, QuickBooks CSV importer — COMPLETED
 
 **Safety net first (the user's decision), and it earned its keep immediately**
