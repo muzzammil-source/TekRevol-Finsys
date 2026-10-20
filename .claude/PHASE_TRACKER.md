@@ -1445,6 +1445,19 @@ _(newest entries at the top)_
 
 -->
 
+### 2026-10-20 — Bulk "Delete Selected" on the pending feed — COMPLETED
+
+Asked for a Delete/Ignore Selected button beside Bulk Post, with a confirmation, that only touches unposted feed rows.
+
+- **`POST /api/bank-transactions/bulk-ignore`** — sets `status = 'IGNORED'` on the selected rows. **Dismissed, not deleted**, and the reason matters: the deduplication hash lives on the row, so a hard DELETE would free it and the very next sync or statement upload would bring the transaction straight back. Ignored rows vanish from the feed (both tabs filter by status) and stay recoverable in the database.
+- **The guard is server-side and belt-and-braces:** only rows that are `PENDING` **and** have `journalEntryId IS NULL` are updated, plus a `canAccessEntity` check per row. Anything posted comes back in `skipped` with "Already posted to the ledger — unpost it first" rather than being silently detached from its journal entry. The UI's own filtering is not relied on — a stale selection or a hand-made request hits the same wall.
+- UI: "Delete Selected" (outline) beside "Bulk Post Selected" in the existing selection bar, a `window.confirm` naming the count, and a toast that reports how many were removed and why any were left alone. Hook `useBulkIgnoreBankTransactions`; rule added to `RULES` with capability `post`, since deciding what never reaches the books deserves the same authority as posting.
+- **Verified on an isolated copy** (API :3090 + Vite :5053 — the live dev database was never written to): a deliberately mixed selection of 2 pending + 1 posted returned `{ignored: 2, skipped: [{id: 17, reason: "Already posted…"}]}`; feed went 12 pending → 10 with 2 ignored, posted stayed 3, and `journal_entries` stayed at 6 entries / 14 lines, still balanced at 12,649.84 each way. Re-running the same ids returned "Already ignored"; an unknown id returned "No longer exists". In the browser: confirmation read "Are you sure you want to delete 2 selected pending transactions?", rows dropped 5 → 3, toast "Removed 2 transactions from the feed", and the Posted tab still listed all 3.
+
+**Worth knowing:** there is currently **no UI to see or restore an ignored row** — they simply disappear from both tabs. The data is still there (`status = 'IGNORED'`), so an "Ignored" filter or tab would be a small addition if dismissals ever need reviewing.
+
+**Testing trap hit along the way:** copying `finance.dev.db` without its `-wal` gave a test copy several unposts behind the live file. Same pitfall the backup module documents — copy the WAL too, or checkpoint first.
+
 ### 2026-10-20 — Bank Summary Cards (UI only) — COMPLETED
 
 Requested with an explicit constraint: **no schema, endpoint, calculation or posting changes** — a view over what already exists. Honoured exactly; the diff is three frontend files and `git status` showed nothing under `server/`.

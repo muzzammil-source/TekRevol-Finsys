@@ -2722,6 +2722,53 @@ app.patch("/api/bank-transactions/:id/status", (req, res) => {
   res.json(db.prepare("SELECT * FROM bank_transactions WHERE id = ?").get(req.params.id));
 });
 
+// Clear selected rows out of the pending feed (2026-10-20).
+//
+// These are dismissed, not destroyed: the row stays with status IGNORED, so
+// it disappears from the feed while its deduplication hash keeps the same
+// transaction from being re-imported on the next sync or upload. A hard
+// DELETE would free that hash and the row would come straight back.
+//
+// A posted transaction is refused outright, whatever the caller says. It
+// owns a journal entry, and detaching it from the feed would leave the
+// ledger holding an entry no bank line explains. The filter is `status =
+// 'PENDING' AND journalEntryId IS NULL` — belt and braces, since those two
+// should always agree and this is the one place it matters if they don't.
+app.post("/api/bank-transactions/bulk-ignore", (req, res) => {
+  const ids = Array.isArray(req.body?.ids) ? req.body.ids.map(Number).filter((n: number) => Number.isFinite(n)) : [];
+  if (ids.length === 0) return res.status(400).json({ error: "ids is required" });
+
+  const rows = db
+    .prepare(`SELECT bt.id, bt.status, bt.journalEntryId, ba.entityId FROM bank_transactions bt
+              JOIN bank_accounts ba ON ba.id = bt.bankAccountId
+              WHERE bt.id IN (${ids.map(() => "?").join(",")})`)
+    .all(...ids) as any[];
+
+  const skipped: { id: number; reason: string }[] = [];
+  const eligible: number[] = [];
+  const found = new Set(rows.map((r) => r.id));
+  for (const id of ids) if (!found.has(id)) skipped.push({ id, reason: "No longer exists" });
+
+  for (const row of rows) {
+    if (!canAccessEntity(req, row.entityId)) { skipped.push({ id: row.id, reason: "Not your entity" }); continue; }
+    if (row.status === "POSTED" || row.journalEntryId) {
+      skipped.push({ id: row.id, reason: "Already posted to the ledger — unpost it first" });
+      continue;
+    }
+    if (row.status !== "PENDING") { skipped.push({ id: row.id, reason: `Already ${row.status.toLowerCase()}` }); continue; }
+    eligible.push(row.id);
+  }
+
+  if (eligible.length) {
+    db.transaction(() => {
+      const stmt = db.prepare("UPDATE bank_transactions SET status = 'IGNORED' WHERE id = ? AND status = 'PENDING' AND journalEntryId IS NULL");
+      for (const id of eligible) stmt.run(id);
+    })();
+  }
+
+  res.json({ ignored: eligible.length, ignoredIds: eligible, skipped });
+});
+
 app.post("/api/bank-transactions/import", bankTransactionImportUpload.single("statement"), (req, res) => {
   try {
     const bankAccountId = Number(req.body.bankAccountId);

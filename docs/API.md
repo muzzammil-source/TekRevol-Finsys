@@ -257,6 +257,7 @@ this is the double-entry-aware staging layer (`bank_accounts`,
 | POST | `/api/bank-transactions/plaid-sync` | `{ bankAccountId }` | `useSyncPlaidBankAccount` |
 | POST | `/api/bank-transactions/:id/post` | `{ accountId?, entityId?, brandId?, postingDate?, description?, reference? }` | `usePostBankTransaction` |
 | POST | `/api/bank-transactions/bulk-post` | `{ items: [{ bankTransactionId, accountId?, entityId?, brandId? }] }` | `useBulkPostBankTransactions` |
+| POST | `/api/bank-transactions/bulk-ignore` | `{ ids: number[] }` → `{ ignored, ignoredIds[], skipped: [{ id, reason }] }` (2026-10-20). Clears rows out of the pending feed by setting status `IGNORED` — **not** a delete, so the row's deduplication hash still blocks the same transaction being re-imported. Only rows that are `PENDING` **and** have no `journalEntryId` are touched; anything posted is refused and returned in `skipped`, never silently detached from its entry. Capability `post`, entity-filtered |
 | GET | `/api/categorization-rules` | — | `useListCategorizationRules` |
 | POST/PUT/DELETE | `/api/categorization-rules[/:id]` | `{ matchPattern, matchType, targetAccountId, targetBrandId?, targetEntityId, priority?, isActive? }` | — (no hook yet — rule management UI doesn't exist) |
 

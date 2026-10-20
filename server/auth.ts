@@ -212,6 +212,9 @@ const RULES: Rule[] = [
   R("PUT", /^\/api\/bank-transactions\/\d+\/stage$/, "stage"),
   R("POST", /^\/api\/bank-transactions\/\d+\/(post|unpost|post-split)$/, "post"),
   R("POST", /^\/api\/bank-transactions\/bulk-post$/, "post"),
+  // Dismissing feed rows decides what never reaches the books, so it needs
+  // the same authority as posting them.
+  R("POST", /^\/api\/bank-transactions\/bulk-ignore$/, "post"),
   R("PATCH", /^\/api\/bank-transactions\/\d+\/status$/, "post"),
 
   // --- Contacts / sub-ledgers ---

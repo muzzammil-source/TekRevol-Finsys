@@ -17,6 +17,7 @@ import {
   type Contact,
   type ContactType,
   useBulkPostBankTransactions,
+  useBulkIgnoreBankTransactions,
   useImportBankStatement,
   useRefreshBankAccountBalance,
   useSyncPlaidBankAccount,
@@ -1451,6 +1452,7 @@ function PendingTransactionsTab({
     }
   };
   const bulkPost = useBulkPostBankTransactions();
+  const bulkIgnore = useBulkIgnoreBankTransactions();
 
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
   const [overrides, setOverrides] = useState<Record<number, RowOverride>>({});
@@ -1620,6 +1622,41 @@ function PendingTransactionsTab({
     );
   };
 
+  // Removes selected rows from the pending feed. They are marked IGNORED
+  // rather than deleted outright, which is what stops the next sync or
+  // statement upload from simply bringing them back — the deduplication
+  // hash lives on the row. Anything already posted is refused by the
+  // server and reported here, never silently dropped.
+  const handleBulkIgnore = () => {
+    const ids = [...selectedIds];
+    if (ids.length === 0) return;
+    const confirmed = window.confirm(
+      `Are you sure you want to delete ${ids.length} selected pending transaction${ids.length === 1 ? '' : 's'}?\n\n` +
+        'They will be removed from this feed and will not be imported again. ' +
+        'Nothing already posted to the General Ledger is affected.',
+    );
+    if (!confirmed) return;
+
+    bulkIgnore.mutate(
+      { ids },
+      {
+        onSuccess: (res) => {
+          const refused = res.skipped.length;
+          toast({
+            title: `Removed ${res.ignored} transaction${res.ignored === 1 ? '' : 's'} from the feed`,
+            description: refused
+              ? `${refused} left alone — ${[...new Set(res.skipped.map((s) => s.reason))].join('; ')}`
+              : undefined,
+            variant: refused && res.ignored === 0 ? 'destructive' : undefined,
+          });
+          setSelectedIds(new Set());
+          invalidateAll();
+        },
+        onError: (err: any) => toast({ title: 'Could not remove them', description: err.message, variant: 'destructive' }),
+      },
+    );
+  };
+
   const columns = useResizableColumns('finsys.banking.pending.columns.v3', PENDING_DEFAULT_WIDTHS);
 
   // The fields the toolbar searches and the headers sort / filter on. The
@@ -1679,11 +1716,18 @@ function PendingTransactionsTab({
         </div>
       )}
       {canPost && selectedIds.size > 0 && (
-        <div className="flex items-center justify-between rounded-md border bg-muted/40 px-3 py-2">
+        <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border bg-muted/40 px-3 py-2">
           <span className="text-sm font-mono">{selectedIds.size} selected · net {formatMoney(selectedTotal, 'USD')}</span>
-          <Button size="sm" onClick={handleBulkPost} disabled={bulkPost.isPending}>
-            <Send className="mr-2 size-4" /> {bulkPost.isPending ? 'Posting…' : 'Bulk Post Selected'}
-          </Button>
+          <div className="flex items-center gap-2">
+            {/* Dismisses rows from the feed; the server refuses anything
+                already posted, so this can't reach the ledger. */}
+            <Button size="sm" variant="outline" onClick={handleBulkIgnore} disabled={bulkIgnore.isPending || bulkPost.isPending}>
+              <Trash2 className="mr-2 size-4" /> {bulkIgnore.isPending ? 'Removing…' : 'Delete Selected'}
+            </Button>
+            <Button size="sm" onClick={handleBulkPost} disabled={bulkPost.isPending || bulkIgnore.isPending}>
+              <Send className="mr-2 size-4" /> {bulkPost.isPending ? 'Posting…' : 'Bulk Post Selected'}
+            </Button>
+          </div>
         </div>
       )}
       </div>

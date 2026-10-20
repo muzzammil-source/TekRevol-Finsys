@@ -654,6 +654,22 @@ export function usePostBankTransactionSplit() {
   });
 }
 
+/**
+ * Dismisses pending feed rows (status → IGNORED). Rows already posted are
+ * refused server-side and come back in `skipped`, so a stale selection can
+ * never detach a transaction from its journal entry.
+ */
+export function useBulkIgnoreBankTransactions() {
+  return useMutation({
+    mutationFn: ({ ids }: { ids: number[] }) =>
+      jsonPost('/bank-transactions/bulk-ignore', { ids }) as Promise<{
+        ignored: number;
+        ignoredIds: number[];
+        skipped: { id: number; reason: string }[];
+      }>,
+  });
+}
+
 export function useBulkPostBankTransactions() {
   return useMutation({
     mutationFn: ({ items }: { items: { bankTransactionId: number; accountId?: number; entityId?: number; brandId?: number; chargedToEntityId?: number; contactId?: number | null }[] }) =>
