@@ -1,20 +1,24 @@
 import React from 'react';
-import { useBankingCards } from '@workspace/api-client-react';
+import { useBankingCards, useListBankAccounts } from '@workspace/api-client-react';
 import { Skeleton } from '@/components/ui/skeleton';
 import { SurfaceCard } from '@/components/layout';
 import { entityLabel } from '@/lib/constants';
 import { Link } from 'wouter';
-import { AlertTriangle, ArrowRight, Landmark, RefreshCw } from 'lucide-react';
+import { AlertTriangle, ArrowRight, Landmark } from 'lucide-react';
+import { formatDistanceToNowStrict } from 'date-fns';
 
-// Bank Summary Cards (2026-10-20) — one card per cash/bank head, showing
-// what the bank says against what the books say.
+// Bank Summary Cards (2026-10-20) — one compact card per cash/bank head,
+// showing what the bank says against what the books say.
 //
-// Strictly a view. It reads `GET /api/banking/cards`, the same endpoint the
-// Bank Transactions hub already uses, which returns both figures per
-// account: `liveBalance` (the feed's reported balance) and `ledgerBalance`
-// (the GL balance, computed server-side from posted lines). Nothing here
+// Strictly a view. It reads `GET /api/banking/cards` (the endpoint the Bank
+// Transactions hub already uses, which returns both figures per account)
+// and `GET /api/bank-accounts` for the last-synced timestamp. Nothing here
 // recomputes a balance, writes anything, or adds an endpoint — a difference
 // shown on a card is the server's own arithmetic, not this component's.
+//
+// Laid out to fit four or more across a desktop row: the grid is
+// auto-fit/minmax rather than a fixed column count, so cards reflow from
+// one column on a phone up to as many as the width allows.
 
 type BankCard = {
   accountId: number;
@@ -29,28 +33,21 @@ type BankCard = {
   localBalance: number;
   localRateFound: boolean;
   liveBalance: number | null;
-  liveRateFound: boolean | null;
 };
 
-function money(amount: number | null | undefined, currency: string) {
+/** Compact money: no currency symbol repetition inside a 220px card. */
+function money(amount: number | null | undefined) {
   if (amount === null || amount === undefined) return null;
-  try {
-    return new Intl.NumberFormat('en-US', { style: 'currency', currency, maximumFractionDigits: 2 }).format(amount);
-  } catch {
-    return `${amount.toFixed(2)} ${currency}`;
-  }
+  return new Intl.NumberFormat('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(amount);
 }
 
-function Figure({ label, value, muted, tone }: { label: string; value: React.ReactNode; muted?: string; tone?: 'plain' | 'bad' }) {
-  return (
-    <div className="min-w-0 flex-1">
-      <div className="text-[10px] font-semibold uppercase tracking-wider text-gray-400">{label}</div>
-      <div className={`mt-0.5 truncate font-mono text-[15px] font-semibold tabular-nums ${tone === 'bad' ? 'text-rose-700' : 'text-gray-900'}`}>
-        {value}
-      </div>
-      {muted && <div className="mt-0.5 truncate text-[10px] text-gray-400">{muted}</div>}
-    </div>
-  );
+function syncLabel(iso: string | null | undefined, connectionType: string): string {
+  if (!iso) return connectionType === 'PLAID' ? 'Never synced' : 'Statement upload';
+  try {
+    return `Synced ${formatDistanceToNowStrict(new Date(iso), { addSuffix: true })}`;
+  } catch {
+    return 'Synced';
+  }
 }
 
 export function BankSummaryCards({
@@ -68,18 +65,30 @@ export function BankSummaryCards({
     data: { cards: BankCard[] } | undefined;
     isLoading: boolean;
   };
+  // Only for the "last synced" stamp — the balances themselves come from
+  // the cards endpoint, so the two can never disagree.
+  const { data: bankAccounts } = useListBankAccounts();
+  const syncedAt = React.useMemo(() => {
+    const map = new Map<number, string | null>();
+    for (const a of ((bankAccounts || []) as any[])) map.set(a.id, a.currentBalanceUpdatedAt ?? null);
+    return map;
+  }, [bankAccounts]);
 
   const cards = (data?.cards || []).filter((c) => c.subType !== 'Intercompany Clearing');
   const entityName = (id: number | null) => {
-    if (id == null) return 'Shared / Global';
+    if (id == null) return 'Shared';
     const match = (entities || []).find((e) => e.id === id);
     return match ? entityLabel(match.name) : `Entity ${id}`;
   };
 
+  // auto-fit + minmax: four across at ~1000px of content width, more on a
+  // wider screen, gracefully down to one on a phone.
+  const grid = 'grid gap-2 grid-cols-[repeat(auto-fit,minmax(220px,1fr))]';
+
   if (isLoading) {
     return (
-      <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3" data-bank-summary-loading>
-        {[0, 1, 2].map((i) => <Skeleton key={i} className="h-[136px] w-full rounded-md" />)}
+      <div className={grid} data-bank-summary-loading>
+        {[0, 1, 2, 3].map((i) => <Skeleton key={i} className="h-[104px] w-full rounded-md" />)}
       </div>
     );
   }
@@ -96,18 +105,19 @@ export function BankSummaryCards({
 
   return (
     <div data-bank-summary>
-      <div className="mb-2">
-        <div className="text-[13px] font-semibold text-gray-900">{title}</div>
-        <div className="text-[11px] text-gray-400">{description}</div>
+      <div className="mb-1.5 flex items-baseline gap-2">
+        <span className="text-[12px] font-semibold text-gray-900">{title}</span>
+        <span className="truncate text-[10px] text-gray-400">{description}</span>
       </div>
-      <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
+
+      <div className={grid}>
         {cards.map((card) => {
           const currency = card.localCurrency || 'USD';
           const book = card.localBalance ?? 0;
           const bank = card.liveBalance;
-          // Only a real comparison when the bank actually reported one.
-          // A manually uploaded statement has no live balance, and showing
-          // a difference against a missing number would invent a variance.
+          // Only a real comparison when the bank actually reported one. A
+          // manually uploaded statement has no live balance, and showing a
+          // difference against a missing number would invent a variance.
           const hasBank = bank !== null && bank !== undefined;
           const difference = hasBank ? Math.round((bank! - book) * 100) / 100 : null;
           const reconciled = difference !== null && Math.abs(difference) < 0.005;
@@ -115,77 +125,80 @@ export function BankSummaryCards({
           return (
             <div
               key={card.accountId}
-              className="rounded-md border border-[#E2E8F0] bg-white p-4 shadow-sm transition-colors hover:border-slate-300"
+              className="flex flex-col rounded-md border border-[#E2E8F0] bg-white px-2.5 py-1.5 shadow-sm transition-colors hover:border-slate-300"
               data-bank-card={card.accountId}
             >
-              <div className="flex items-start justify-between gap-2">
-                <div className="min-w-0">
-                  <div className="flex items-center gap-1.5 truncate text-[13px] font-semibold text-gray-900">
-                    <Landmark className="size-3.5 shrink-0 text-gray-400" />
-                    <span className="truncate" title={card.name}>{card.name}</span>
-                  </div>
-                  <div className="mt-0.5 truncate text-[11px] text-gray-400">
-                    <span className="font-mono">{card.code}</span> · {entityName(card.entityId)} · {currency}
-                  </div>
-                </div>
+              {/* Identity */}
+              <div className="flex items-center gap-1.5">
+                <Landmark className="size-3 shrink-0 text-gray-400" />
+                <span className="min-w-0 flex-1 truncate text-[12px] font-semibold leading-tight text-gray-900" title={card.name}>
+                  {card.name}
+                </span>
                 {card.connectionType === 'PLAID' && (
-                  <span className="shrink-0 rounded bg-slate-100 px-1.5 py-0.5 text-[9px] font-medium uppercase tracking-wider text-slate-600">
+                  <span className="shrink-0 rounded bg-slate-100 px-1 text-[8px] font-medium uppercase tracking-wider text-slate-600">
                     Live
                   </span>
                 )}
               </div>
-
-              <div className="mt-3 flex items-start gap-3 border-t border-gray-100 pt-3">
-                <Figure
-                  label="Bank Balance"
-                  value={hasBank ? money(bank, currency) : <span className="text-[13px] font-normal text-gray-300">Not reported</span>}
-                  muted={hasBank ? undefined : card.connectionType === 'MANUAL_UPLOAD' ? 'Uploaded statements carry no balance' : undefined}
-                />
-                <div className="mt-3 h-6 w-px shrink-0 bg-gray-100" />
-                <Figure label="Book Balance (GL)" value={money(book, currency)} />
+              <div className="truncate text-[9.5px] leading-tight text-gray-400" title={`${card.code} · ${entityName(card.entityId)} · ${currency}`}>
+                <span className="font-mono">{card.code}</span> · {entityName(card.entityId)} · {currency}
               </div>
 
-              <div className="mt-3 flex flex-wrap items-center justify-between gap-2 border-t border-gray-100 pt-2.5">
-                <div className="min-w-0 text-[11px]">
+              {/* The two figures, side by side */}
+              <div className="mt-1 flex items-end gap-2 border-t border-gray-100 pt-1">
+                <div className="min-w-0 flex-1">
+                  <div className="text-[8.5px] font-semibold uppercase leading-tight tracking-wide text-gray-400">Bank</div>
+                  <div className="truncate font-mono text-[12px] font-semibold leading-tight tabular-nums text-gray-900">
+                    {hasBank ? money(bank) : <span className="font-sans text-[10px] font-normal text-gray-300">Not reported</span>}
+                  </div>
+                </div>
+                <div className="mb-0.5 h-4 w-px shrink-0 bg-gray-100" />
+                <div className="min-w-0 flex-1">
+                  <div className="text-[8.5px] font-semibold uppercase leading-tight tracking-wide text-gray-400">Book (GL)</div>
+                  <div className="truncate font-mono text-[12px] font-semibold leading-tight tabular-nums text-gray-900">{money(book)}</div>
+                </div>
+              </div>
+
+              {/* Status, sync and the way in to reconciling — one line, so
+                  the card stays four-across without a third band. */}
+              <div className="mt-1 flex items-center justify-between gap-1.5 border-t border-gray-100 pt-1">
+                <div className="flex min-w-0 items-center gap-1 text-[9.5px] leading-tight">
                   {difference === null ? (
-                    <span className="text-gray-400">No bank balance to compare</span>
+                    <span className="shrink-0 text-gray-400">No bank bal.</span>
                   ) : reconciled ? (
-                    <span className="font-medium text-emerald-700">Matches the books</span>
+                    <span className="shrink-0 font-medium text-emerald-700">Matches</span>
                   ) : (
-                    <span className="flex items-center gap-1 font-medium text-amber-700" data-bank-card-difference>
-                      <AlertTriangle className="size-3 shrink-0" />
-                      Off by {money(Math.abs(difference), currency)}
+                    <span className="flex shrink-0 items-center gap-0.5 font-medium text-amber-700" data-bank-card-difference>
+                      <AlertTriangle className="size-2.5 shrink-0" />
+                      Off {money(Math.abs(difference!))}
                     </span>
                   )}
-                  {card.unpostedCount > 0 && (
-                    <div className="mt-0.5 flex items-center gap-1 text-gray-500">
-                      <RefreshCw className="size-3 shrink-0" />
-                      {card.unpostedCount} transaction{card.unpostedCount === 1 ? '' : 's'} not yet posted
-                    </div>
-                  )}
-                  {!card.localRateFound && (
-                    <div className="mt-0.5 text-amber-700">No {currency} rate configured — figure is unconverted</div>
-                  )}
+                  <span
+                    className="truncate text-gray-400"
+                    title={`${syncLabel(syncedAt.get(card.bankAccountId ?? -1), card.connectionType)}${card.unpostedCount ? ` · ${card.unpostedCount} unposted` : ''}${card.localRateFound ? '' : ` · no ${currency} rate configured`}`}
+                  >
+                    · {syncLabel(syncedAt.get(card.bankAccountId ?? -1), card.connectionType)}
+                    {card.unpostedCount > 0 && ` · ${card.unpostedCount} unposted`}
+                    {!card.localRateFound && <span className="text-amber-700"> · no rate</span>}
+                  </span>
                 </div>
 
-                {/* Opens the reconciliation workflow with this account
-                    already chosen. Accounts with no feed have nothing to
-                    reconcile against, so they link to the hub instead. */}
                 {card.bankAccountId ? (
                   <Link
                     href={`/banking/reconciliation?account=${card.bankAccountId}`}
-                    className="flex shrink-0 items-center gap-1 rounded-md border border-[#E2E8F0] px-2 py-1 text-[11px] font-medium text-[#0F172A] transition-colors hover:bg-[#F1F5F9]"
+                    className="flex shrink-0 items-center gap-0.5 rounded border border-[#E2E8F0] px-1.5 py-0.5 text-[9.5px] font-medium text-[#0F172A] transition-colors hover:bg-[#F1F5F9]"
+                    title={`Reconcile ${card.name}`}
                     data-reconcile-link={card.bankAccountId}
                   >
-                    Reconcile <ArrowRight className="size-3" />
+                    Reconcile <ArrowRight className="size-2.5" />
                   </Link>
                 ) : (
                   <Link
                     href="/banking"
-                    className="flex shrink-0 items-center gap-1 rounded-md border border-dashed border-[#E2E8F0] px-2 py-1 text-[11px] text-gray-500 transition-colors hover:bg-[#F1F5F9]"
-                    title="This account has no bank feed yet — connect one or upload a statement"
+                    className="shrink-0 rounded border border-dashed border-[#E2E8F0] px-1.5 py-0.5 text-[9.5px] text-gray-500 transition-colors hover:bg-[#F1F5F9]"
+                    title="No bank feed yet — connect one or upload a statement"
                   >
-                    Set up feed <ArrowRight className="size-3" />
+                    Set up
                   </Link>
                 )}
               </div>
