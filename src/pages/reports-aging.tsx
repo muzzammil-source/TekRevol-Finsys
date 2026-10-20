@@ -7,6 +7,7 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { entityLabel } from '@/lib/constants';
 import { useAuth } from '@/lib/auth';
+import { useStickyState } from '@/lib/sticky-state';
 import { AlertTriangle } from 'lucide-react';
 import { format } from 'date-fns';
 
@@ -33,7 +34,8 @@ function money(n: number) {
 
 export default function ReportsAging() {
   const [asOfDate, setAsOfDate] = useState(format(new Date(), 'yyyy-MM-dd'));
-  const [entityId, setEntityId] = useState('all');
+  // Survives a refresh, so reloading doesn't drop the chosen entity.
+  const [entityId, setEntityId] = useStickyState('finsys.aging.entity', 'all');
   const [netTermsDays, setNetTermsDays] = useState('0');
   const [accountId, setAccountId] = useState('');
 

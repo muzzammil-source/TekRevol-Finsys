@@ -1445,6 +1445,30 @@ _(newest entries at the top)_
 
 -->
 
+### 2026-10-20 — "Blank UI on login/refresh" — DIAGNOSED (it was date windows, not entity context)
+
+Reported as a blank application state needing an entity-context fix: auto-select the first entity for Admins and persist it. **Reproduced first, and the premise was wrong.**
+
+**What a clean login actually renders** (cookie + localStorage cleared, fresh Admin, no entity chosen): Chart of Accounts 20 rows, General Ledger 9 account cards / 14 lines, Banking 3 cards, Dashboard KPIs + 3 bank summary cards + charts. Nothing is structurally blank.
+
+**The real cause:** every posted entry in these books is dated **March 2026**, and today is **20 October 2026**. The Dashboard's default trailing window is 3 months and the Cash Flow chart's is 6 — both exclude the data. Proof, same session and same entity selection:
+
+| Trailing window | Burn | Runway | Margin |
+|---|---|---|---|
+| Last 3 Months (default) | $0 | No burn in period | — |
+| Last 12 Months | $2 | 104,509 days | 99.7% |
+
+**Why the requested fix was not implemented:** forcing the first entity for a user with `allEntities` would make the Dashboard, P&L and Balance Sheet show **one entity while still looking consolidated** — a quietly wrong number on a book of record, and it would not have fixed the blankness anyway. Raised with the user rather than done silently.
+
+**What was built instead**
+- `src/lib/sticky-state.ts` — `useStickyState`, a localStorage-backed view preference, every access guarded (private windows and blocked storage throw). View preferences only; never figures.
+- Applied to the entity picker on **Dashboard, General Ledger, Trial Balance and A/R & A/P Aging**, plus the Dashboard's trailing window. This is the half of the request that was real: a refresh used to discard whatever the user had selected. It persists **what they chose**, including "All Consolidated" — it does not choose for them.
+- **Dashboard empty-window notice**: when the window holds no activity, it says so and offers "Show last 12 months" instead of presenting a page of silent zeros. The figures are not widened automatically, because that would change what the headline numbers mean without the user asking.
+
+**Verified**: clean login → notice appears with the default 3-month window; clicking the button → 12 months, burn $2, margin 99.7%, notice gone; refresh → still 12 months with data. On the GL, picking FZCO and refreshing kept FZCO (`finsys.gl.entity` = "4"). typecheck clean.
+
+**Also done:** the production database copy downloaded for the earlier diagnosis (`scratchpad/prod-snapshot/`, live figures + a password hash) was deleted.
+
 ### 2026-10-20 — Bulk "Delete Selected" on the pending feed — COMPLETED
 
 Asked for a Delete/Ignore Selected button beside Bulk Post, with a confirmation, that only touches unposted feed rows.

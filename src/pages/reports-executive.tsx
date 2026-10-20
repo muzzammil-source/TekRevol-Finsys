@@ -6,6 +6,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Skeleton } from '@/components/ui/skeleton';
 import { entityLabel } from '@/lib/constants';
 import { useAuth } from '@/lib/auth';
+import { useStickyState } from '@/lib/sticky-state';
 import { format } from 'date-fns';
 import { CashFlowTrendCard, MonthlyPerformanceCard } from '@/components/dashboard-charts';
 import { BankSummaryCards } from '@/components/bank-summary-cards';
@@ -64,8 +65,10 @@ export default function ReportsExecutive() {
   const { data: entities } = useListEntities();
   const entitiesList = (entities || []) as any[];
 
-  const [selectedEntityId, setEntityId] = useState('');
-  const [trailingMonths, setTrailingMonths] = useState('3');
+  // Both survive a refresh (2026-10-20): reloading used to drop the user
+  // back on the default view, discarding whatever they had selected.
+  const [selectedEntityId, setEntityId] = useStickyState('finsys.dashboard.entity', '');
+  const [trailingMonths, setTrailingMonths] = useStickyState('finsys.dashboard.trailingMonths', '3');
   // No consolidated dashboard without all-entity access (server-enforced):
   // such users always see one of their own entities, defaulting to the first.
   const { allEntities } = useAuth();
@@ -101,6 +104,12 @@ export default function ReportsExecutive() {
       ? 'good'
       : data.cashRunwayDays < 90 ? 'bad' : data.cashRunwayDays < 180 ? 'warn' : 'good';
   const marginTone = (data?.netOperatingMargin ?? 0) >= 0 ? 'good' : 'bad';
+  // "Nothing happened in this window" — distinguished from "the books are
+  // empty", which is a different message and not one this page can make.
+  const hasActivityInWindow =
+    (data?.totalRevenue ?? 0) !== 0 ||
+    (data?.monthlyBurnRate ?? 0) !== 0 ||
+    (data?.netOperatingIncome ?? 0) !== 0;
   const intercompanyNet = data?.intercompany?.net ?? 0;
 
   return (
@@ -136,6 +145,30 @@ export default function ReportsExecutive() {
             </Select>
           </div>
         </div>
+
+        {/* A window with no activity reads as a broken dashboard — every
+            figure is a real zero, but nothing says why. Rather than widen
+            the window silently (which would quietly change what the
+            headline numbers mean), say so and offer the wider view. */}
+        {!isLoading && data && !hasActivityInWindow && (
+          <div className="flex flex-wrap items-center gap-2 rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-xs text-blue-900" data-empty-window>
+            <AlertTriangle className="size-3.5 shrink-0" />
+            <span>
+              Nothing was posted in the last {data?.trailingMonths ?? trailingMonths} months, so these figures are all zero.
+              The books may still hold earlier activity.
+            </span>
+            {trailingMonths !== '12' && (
+              <button
+                type="button"
+                className="rounded border border-blue-300 bg-white px-2 py-0.5 font-medium text-blue-900 hover:bg-blue-100"
+                onClick={() => setTrailingMonths('12')}
+                data-widen-window
+              >
+                Show last 12 months
+              </button>
+            )}
+          </div>
+        )}
 
         {!isLoading && data && !data.rateFound && currency !== 'USD' && (
           <div className="text-xs text-amber-700 flex items-center gap-1">

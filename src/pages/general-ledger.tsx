@@ -9,6 +9,7 @@ import { entityLabel } from '@/lib/constants';
 import { naturalBalance } from '@/lib/account-balance';
 import { showEntryMemo } from '@/lib/entry-memo';
 import { useAuth } from '@/lib/auth';
+import { useStickyState } from '@/lib/sticky-state';
 import { ResizableColGroup, ResizableHeaderCells, defaultWidths, useResizableColumns, type ResizableColumnDef } from '@/components/resizable-columns';
 import { format, startOfYear } from 'date-fns';
 
@@ -66,7 +67,8 @@ export default function GeneralLedger() {
   // from earlier months until the user widened the range) — matches P&L.
   const [startDate, setStartDate] = useState(format(startOfYear(new Date()), 'yyyy-MM-dd'));
   const [endDate, setEndDate] = useState(format(new Date(), 'yyyy-MM-dd'));
-  const [entityId, setEntityId] = useState('all');
+  // Survives a refresh, so reloading doesn't drop the chosen entity.
+  const [entityId, setEntityId] = useStickyState('finsys.gl.entity', 'all');
   const [accountId, setAccountId] = useState('all');
 
   const { data: entities } = useListEntities();

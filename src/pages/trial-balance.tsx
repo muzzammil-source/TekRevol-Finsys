@@ -9,6 +9,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { CheckCircle2, ChevronRight, XCircle } from 'lucide-react';
 import { SubledgerDialog, hasSubledger } from '@/components/subledger-dialogs';
 import { useAuth } from '@/lib/auth';
+import { useStickyState } from '@/lib/sticky-state';
 import { entityLabel } from '@/lib/constants';
 import { format } from 'date-fns';
 
@@ -28,7 +29,8 @@ const TYPE_BADGE: Record<string, string> = {
 export default function TrialBalance() {
   const [asOfDate, setAsOfDate] = useState(format(new Date(), 'yyyy-MM-dd'));
   const { allEntities } = useAuth();
-  const [entityId, setEntityId] = useState('all');
+  // Survives a refresh, so reloading doesn't drop the chosen entity.
+  const [entityId, setEntityId] = useStickyState('finsys.trialBalance.entity', 'all');
   const [drill, setDrill] = useState<{ accountId: number; code: string; name: string } | null>(null);
   const { data: entities } = useListEntities();
   // No consolidated view without all-entity access: default to the first
