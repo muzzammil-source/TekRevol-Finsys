@@ -8,6 +8,7 @@ import { entityLabel } from '@/lib/constants';
 import { useAuth } from '@/lib/auth';
 import { format } from 'date-fns';
 import { CashFlowTrendCard, MonthlyPerformanceCard } from '@/components/dashboard-charts';
+import { BankSummaryCards } from '@/components/bank-summary-cards';
 import { AlertTriangle, ArrowDownRight, ArrowUpRight, Gauge, Landmark, Scale, TrendingDown } from 'lucide-react';
 
 function formatMoney(amount: number, currency = 'USD') {
@@ -180,6 +181,15 @@ export default function ReportsExecutive() {
             sub={`Net income ${formatMoney(data?.netOperatingIncome || 0, currency)} on revenue ${formatMoney(data?.totalRevenue || 0, currency)}`}
           />
         </div>
+
+        {/* Bank against book, per account — the first thing to look at when
+            a cash figure above looks wrong. Each card links into
+            reconciling that account. */}
+        <BankSummaryCards
+          entityId={entityId ? Number(entityId) : undefined}
+          entities={entitiesList}
+          description="Bank-reported balance against the posted GL balance, per account"
+        />
 
         {/* Cash movement (left) against what the P&L earned (right), side by
             side on wide screens and stacked on narrow ones. */}

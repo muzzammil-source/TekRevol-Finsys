@@ -1445,6 +1445,18 @@ _(newest entries at the top)_
 
 -->
 
+### 2026-10-20 — Bank Summary Cards (UI only) — COMPLETED
+
+Requested with an explicit constraint: **no schema, endpoint, calculation or posting changes** — a view over what already exists. Honoured exactly; the diff is three frontend files and `git status` showed nothing under `server/`.
+
+- **`src/components/bank-summary-cards.tsx`** (new) reads `GET /api/banking/cards`, the endpoint the Bank Transactions hub already uses, which returns both figures per cash head: `liveBalance` (what the feed reported) and `ledgerBalance`/`localBalance` (the GL balance, computed server-side from posted lines). The component recomputes nothing — a difference on a card is the server's arithmetic subtracted, not a second implementation of a balance.
+- Each card: account name, code, entity, currency, a LIVE badge for Plaid feeds, **Bank Balance and Book Balance (GL) side by side**, the variance, the unposted-transaction count, and a link into reconciliation for that account.
+- **Deliberate restraint on the variance:** it is only shown when the bank actually reported a balance. Manual-upload feeds carry none, and a card that subtracted from a missing number would invent a variance out of nothing — those read "No bank balance to compare".
+- Placed on the **Dashboard** (under the KPI row) and at the top of **Bank Reconciliation**. The link is `/banking/reconciliation?account=<bankAccountId>`; the reconciliation page reads that query parameter once on mount to preselect the account, after which the dropdown owns the selection. Intercompany clearing heads are filtered out — they are not bank accounts.
+- **Verified in the browser** (1440×900, temporary dev admin): three cards rendered with correct codes, entities and currencies; setting a test bank balance of 7,900.00 against a book balance of 7,957.17 produced "Off by $57.17"; the Reconcile link navigated to `?account=6` and the dropdown came up on "Chase — Chase Bank Checking (TekRevol TX)". Test balance cleared and the temporary admin removed afterwards. typecheck, 25 tests and build all clean.
+
+**Note for whoever uses this:** every card currently reads "Not reported" for Bank Balance, because no feed has ever stored one — `bank_accounts.currentBalance` is only populated by a Plaid balance refresh, and uploaded statements don't carry a balance. The comparison is the point of the card, so it is worth either refreshing the Plaid balance or adding a way to enter a statement balance manually. That would be a backend change and was out of scope here.
+
 ### 2026-10-20 — Automated daily backups — COMPLETED
 
 Closes the risk the readiness audit flagged the same day: taking the database out of git removed the only copy of the books, leaving the volume as a single point of failure.

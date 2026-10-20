@@ -15,6 +15,7 @@ import {
   getListReconciliationsQueryKey,
 } from '@workspace/api-client-react';
 import { PageContent, PageHeader } from '@/components/layout';
+import { BankSummaryCards } from '@/components/bank-summary-cards';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -68,7 +69,12 @@ export default function BankReconciliation() {
     return map;
   }, [journalEntries]);
 
-  const [bankAccountId, setBankAccountId] = useState<string>('');
+  // `?account=<bankAccountId>` preselects the account, so the summary cards
+  // can link straight into reconciling a specific one. Read once on mount:
+  // after that the dropdown owns the selection.
+  const [bankAccountId, setBankAccountId] = useState<string>(
+    () => new URLSearchParams(window.location.search).get('account') || '',
+  );
   const [startDate, setStartDate] = useState(monthAgoIso());
   const [endDate, setEndDate] = useState(todayIso());
   const [statementEndingBalance, setStatementEndingBalance] = useState('');
@@ -212,6 +218,9 @@ export default function BankReconciliation() {
         )}
       </PageHeader>
       <PageContent>
+        {/* Where every account stands before picking one to reconcile. */}
+        <BankSummaryCards entities={entitiesList} />
+
         {/* Period & Account Selector */}
         <div className="border border-gray-100 rounded-2xl bg-white shadow-sm p-4 space-y-3">
           <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
