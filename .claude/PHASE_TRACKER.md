@@ -1445,6 +1445,18 @@ _(newest entries at the top)_
 
 -->
 
+### 2026-10-20 — Automated daily backups — COMPLETED
+
+Closes the risk the readiness audit flagged the same day: taking the database out of git removed the only copy of the books, leaving the volume as a single point of failure.
+
+- **`server/backup.ts`** — snapshots through SQLite's **online backup API** (`db.backup()`), never a file copy: copying a live database can capture a page mid-write and the result looks fine until a restore is attempted. Every snapshot is re-opened, `integrity_check`ed, and **deleted if it fails**, so a bad file can never masquerade as a backup. The WAL sidecars left by that verification open are cleaned up, so the folder holds only snapshots.
+- **Scheduled in-process** (`scheduleBackups`): one run ~60s after boot if the newest snapshot is stale, then every `BACKUP_INTERVAL_HOURS` (default 24), keeping `BACKUP_KEEP` (default 14) in `<db folder>/backups`. Timers are `unref`'d. No cron, no second service, nothing to configure on the host — a running container backs itself up. Failures are logged loudly and never crash the server.
+- **Endpoints** (Admin + all entities — a snapshot is the whole ledger plus the users table): `GET /api/backups`, `POST /api/backups/run`, `GET /api/backups/:name/download`. The download only serves names the server itself produced, so the path can't be walked — verified with a traversal attempt that returned 404.
+- **10 new tests** (25 total). They cover what fails silently: that a snapshot really contains the rows, that later writes are *not* in an earlier snapshot, that retention keeps the **newest** files, that a zero/negative retention can't wipe the last copy, and that non-snapshot files are ignored.
+- **Verified end to end** on an isolated copy: triggered a backup over HTTP, downloaded it, re-opened the downloaded file — `integrity: ok`, 3 entities / 6 entries / 14 lines intact. Unauthenticated access returned 401. The local server also took its startup snapshot unprompted, which is the scheduler working in situ.
+
+**Known limit, stated in CLAUDE.md too:** snapshots live on the same volume as the database, so they protect against logical loss, not against losing the volume. Off-site copies are still manual (the download endpoint). Railway object storage is the obvious next step and is **not** built.
+
 ### 2026-10-20 — Production data persistence — SOLVED (volume attached)
 
 The deploy-overwrites-production problem that ran through the whole of October is **closed**. A Railway volume is mounted at `/data` on `@workspace/server` (`railway volume add --mount-path /data`, done from the CLI — no dashboard clicking needed, which is worth remembering), and `DB_PATH=/data/finance.db` is set. The redeploy logged exactly what it should:

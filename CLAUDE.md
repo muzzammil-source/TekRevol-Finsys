@@ -212,6 +212,17 @@ yet. Do not add features that assume it is.
   - `scripts/sync-prod-db.mjs` pulled production's database down when the
     deploy-overwrite problem existed. It is no longer part of any routine,
     and needs an SSH key registered with the Railway CLI to run at all.
+- **Backups (2026-10-20).** The server snapshots itself every 24h into
+  `<database folder>/backups`, keeping 14, through SQLite's **online backup
+  API** — never a file copy, which can capture a page mid-write. Each
+  snapshot is re-opened and `integrity_check`ed, and discarded if it fails.
+  Code in `server/backup.ts`, tested in `server/backup.test.ts`; tunable with
+  `BACKUP_ENABLED` / `BACKUP_INTERVAL_HOURS` / `BACKUP_KEEP` / `BACKUP_DIR`.
+  - **These sit on the same volume as the database.** They cover a bad
+    import, a deletion or a corrupted file — **not** the loss of the volume.
+    Getting copies off the box is still manual: `GET
+    /api/backups/:name/download` (Admin). An off-site target (Railway object
+    storage, S3) is the obvious next step and is not built.
 - **Plaid is optional.** Without `PLAID_CLIENT_ID`/`PLAID_SECRET` the bank screen
   still works using manual bank profiles and uploaded statements.
 

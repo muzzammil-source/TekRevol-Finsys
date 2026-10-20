@@ -231,6 +231,11 @@ const RULES: Rule[] = [
   // only be shown to someone who may see them all.
   R("GET", /^\/api\/reports\/intercompany-balances$/, "read", "allEntitiesOnly"),
 
+  // --- Backups ---
+  // A snapshot is the entire book of record plus the users table, so
+  // listing, triggering and downloading one are all Admin + all entities.
+  R(ANY, /^\/api\/backups(\/.*)?$/, "admin", "allEntitiesOnly"),
+
   // --- Ledger import (Phase C) ---
   // Reading and staging a file is the `import` capability, the same one that
   // governs bank statements. Turning a batch into the book of record is

@@ -16,6 +16,7 @@ import {
   assertCapability,
 } from "./auth";
 import { parseTransactionDetailByAccount, pairTransactions, inferAccountType } from "./qb-import";
+import { backupConfigFor, listBackups, runBackup, scheduleBackups } from "./backup";
 import {
   Configuration,
   CountryCode,
@@ -110,6 +111,12 @@ console.log(`[db] ${DB_PATH}`);
 const db = new Database(DB_PATH);
 db.pragma("journal_mode = WAL");
 db.pragma("foreign_keys = ON");
+
+// Daily snapshots of the books. Since the database left git, the volume is
+// the only copy — so the system makes its own. See server/backup.ts for
+// what these do and do not protect against.
+const BACKUP_CONFIG = backupConfigFor(DB_PATH);
+scheduleBackups(db, BACKUP_CONFIG);
 
 const BANK_STATEMENT_UPLOAD_DIR = path.join(__dirname, "uploads", "bank-statements");
 fs.mkdirSync(BANK_STATEMENT_UPLOAD_DIR, { recursive: true });
@@ -7837,6 +7844,41 @@ app.get("/api/import-batches/:id", (req, res) => {
     .prepare("SELECT id, entryNumber, transactionDate, description, reference, status FROM journal_entries WHERE importBatchId = ? ORDER BY transactionDate, id")
     .all(batch.id);
   res.json({ ...batch, payload: JSON.parse(batch.payloadJson || "{}"), entries });
+});
+
+// ======= BACKUPS =======
+// Admin-only, all-entity: a snapshot is the whole book of record, including
+// every entity's figures and the users table.
+
+app.get("/api/backups", (_req, res) => {
+  res.json({
+    directory: BACKUP_CONFIG.dir,
+    enabled: BACKUP_CONFIG.enabled,
+    intervalHours: BACKUP_CONFIG.intervalHours,
+    keep: BACKUP_CONFIG.keep,
+    backups: listBackups(BACKUP_CONFIG.dir).map((b) => ({ name: b.name, bytes: b.bytes, createdAt: b.createdAt })),
+  });
+});
+
+app.post("/api/backups/run", async (_req, res) => {
+  try {
+    const result = await runBackup(db, BACKUP_CONFIG);
+    res.json({ ...result.file, durationMs: result.durationMs, pruned: result.pruned });
+  } catch (err: any) {
+    res.status(500).json({ error: err?.message || "Backup failed" });
+  }
+});
+
+// The only way to get a copy off the host without shell access — which
+// matters here, because `railway ssh` needs an SSH key this team doesn't
+// have registered.
+app.get("/api/backups/:name/download", (req, res) => {
+  const name = String(req.params.name || "");
+  // Serve only our own snapshots, by exact name: anything else could walk
+  // out of the backup directory.
+  const match = listBackups(BACKUP_CONFIG.dir).find((b) => b.name === name);
+  if (!match) return res.status(404).json({ error: "No such backup" });
+  res.download(match.path, match.name);
 });
 
 // ======= EXCHANGE RATES =======
