@@ -8314,8 +8314,41 @@ app.use((err: any, _req: express.Request, res: express.Response, next: express.N
 // In production, serve the built React app from dist/public
 if (process.env.NODE_ENV === "production") {
   const distPath = path.join(__dirname, "..", "dist", "public");
-  app.use(express.static(distPath));
+
+  // Cache policy matters here more than it looks (2026-10-21).
+  //
+  // index.html names the hashed bundle for that exact build. If anything
+  // in front of this server — Railway's edge, a proxy, a browser — keeps a
+  // stale copy of it, that copy points at a bundle this deploy no longer
+  // has. The request for it then falls through to the SPA handler, which
+  // answers with HTML, the browser refuses to run HTML as a module, and
+  // the page renders completely blank with nothing in the UI to explain
+  // it. That is exactly what production was doing.
+  //
+  // So: hashed assets are immutable and cached hard (their name changes
+  // when their content does), and the HTML is never cached.
+  app.use(
+    "/assets",
+    express.static(path.join(distPath, "assets"), {
+      immutable: true,
+      maxAge: "1y",
+      // A missing bundle must 404 rather than fall through to index.html.
+      // Serving HTML where JavaScript was asked for is what turns a stale
+      // cache into a blank screen instead of a visible, debuggable error.
+      fallthrough: false,
+    }),
+  );
+
+  app.use(
+    express.static(distPath, {
+      setHeaders: (res, filePath) => {
+        if (filePath.endsWith("index.html")) res.setHeader("Cache-Control", "no-store, must-revalidate");
+      },
+    }),
+  );
+
   app.get("*", (_req, res) => {
+    res.setHeader("Cache-Control", "no-store, must-revalidate");
     res.sendFile(path.join(distPath, "index.html"));
   });
 }

@@ -1445,6 +1445,25 @@ _(newest entries at the top)_
 
 -->
 
+### 2026-10-21 — The actual blank screen: a stale cached index.html — FIXED
+
+Yesterday's "blank UI" investigation found the Dashboard's date window, which was real but was **not** what makes the screen go blank. Live inspection of the running container found the rest, and it is worth understanding because it will recur on any SPA deployed this way.
+
+**The mechanism.** `index.html` names the content-hashed bundle for its own build. Railway's edge was serving a cached `index.html` from an older deploy, which named `index-Ck60vvce.js` — a file the current container does not have (`ls /app/dist/public/assets` showed only `index-D1tuYXFN.js`). The request for the missing bundle then hit the SPA catch-all, which answered **HTML with status 200**. A browser will not execute HTML as a module, so nothing boots: a completely blank page, no error visible in the UI.
+
+**Proof it was the edge, not the container:** the public URL returned `index-Ck60vvce.js` as 1.2 MB of `application/javascript` while that file does not exist in the container at all; meanwhile `/assets/index-D1tuYXFN.js` — which *does* exist there — came back as `text/html` 1,620 bytes. Ten samples of `/` all returned the old HTML with `Last-Modified: 01:33:29 GMT`, the previous deployment's timestamp, even though the container's own `index.html` is stamped `02:41:27`.
+
+**The fix (`server/index.ts`, production branch only):**
+- `/assets/**` — `public, max-age=31536000, immutable`. Safe because the filename changes whenever the content does.
+- `index.html` and every SPA route — `no-store, must-revalidate`, so a stale HTML can never be paired with a bundle that no longer exists.
+- `/assets/**` now uses `fallthrough: false`, so a missing bundle returns **404** instead of falling through to index.html. A visible failed module load beats a silent blank page.
+
+**Verified in production mode locally** (`NODE_ENV=production`, throwaway database, port 3089): index.html → `no-store, must-revalidate`; the hashed bundle → `public, max-age=31536000, immutable`; a request for the old `index-Ck60vvce.js` → **404**; `/accounting/general-ledger` → still the SPA.
+
+**Deployment traps found on the way, both still worth knowing:**
+1. `watchPatterns: ["/server/**"]` on the service means **frontend-only commits are SKIPPED and never build** — the deployment list just says SKIPPED with "No changes to watched files". Commit `7be47ae` hit this. Still set; clearing it is a dashboard-only change.
+2. `railway redeploy --from-source` reported SUCCESS on the right commit but served a frontend from a cached layer. Touching a file under `server/` is what actually forces a clean rebuild today.
+
 ### 2026-10-20 — "Blank UI on login/refresh" — DIAGNOSED (it was date windows, not entity context)
 
 Reported as a blank application state needing an entity-context fix: auto-select the first entity for Admins and persist it. **Reproduced first, and the premise was wrong.**
