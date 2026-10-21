@@ -1,4 +1,4 @@
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { useQuery, useMutation } from '@tanstack/react-query';
 
 const BASE = '/api';
 
@@ -671,16 +671,16 @@ export function useBulkUnpostBankTransactions() {
 }
 
 /**
- * Reverses a POSTED journal entry by posting its mirror image — both the
- * original and the reversal stay in the books, which is how a posted entry
- * is corrected (the ledger is a book of record; see server/index.ts).
+ * Reverses a POSTED manual journal entry (JV) by posting its mirror image —
+ * both the original and the reversal stay in the books, which is how a
+ * posted entry is corrected (the ledger is a book of record; see
+ * server/index.ts).
  *
- * Refused server-side for an entry that is already a reversal, already
- * reversed, backing a bill/invoice (void those instead) or posted from a
- * bank transaction (use Undo on the banking screen instead).
+ * Manual JVs only. Bank-feed postings, bills, invoices and imports are
+ * refused server-side with the screen that owns them, because each of those
+ * has something alongside the entry that must move with it.
  */
 export function useReverseJournalEntry() {
-  const qc = useQueryClient();
   return useMutation({
     mutationFn: ({ id, reversalDate, memo }: { id: number; reversalDate?: string; memo?: string }) =>
       jsonPost(`/journal-entries/${id}/reverse`, { reversalDate, memo }) as Promise<{
@@ -689,45 +689,24 @@ export function useReverseJournalEntry() {
         reversalEntryId: number;
         reversalEntryNumber: string;
       }>,
-    onSuccess: () => invalidateLedger(qc),
   });
 }
 
 /**
- * Deletes a DRAFT journal entry outright. A posted entry is refused with a
- * pointer to `useReverseJournalEntry`, except one posted from the bank feed,
- * which is unposted and returned to the pending feed instead.
+ * Deletes a DRAFT manual journal entry outright — it was never in the
+ * books. A posted one is refused with a pointer to
+ * `useReverseJournalEntry`, and a non-manual entry with the screen that
+ * owns it.
  */
 export function useDeleteJournalEntry() {
-  const qc = useQueryClient();
   return useMutation({
     mutationFn: ({ id }: { id: number }) =>
       apiFetch(`/journal-entries/${id}`, { method: 'DELETE' }) as Promise<{
         deleted: true;
-        via: 'draft-delete' | 'bank-unpost';
-        entryNumber?: string;
-        bankTransactionId?: number;
-        removedJournalEntryIds?: number[];
-        message?: string;
+        entryId: number;
+        entryNumber: string;
       }>,
-    onSuccess: () => invalidateLedger(qc),
   });
-}
-
-/**
- * Every derived view of the ledger. Reversing or deleting an entry moves
- * balances, so the account register, trial balance, statements and the GL
- * report all have to be refetched — none of them store a figure, they all
- * re-derive from journal_lines (CLAUDE.md rule 3).
- */
-function invalidateLedger(qc: ReturnType<typeof useQueryClient>) {
-  for (const key of [
-    'general-ledger', 'account-register', 'accounts', 'trial-balance', 'journal-entries',
-    'income-statement', 'balance-sheet', 'cash-flow', 'executive', 'subledger', 'dashboard',
-    'bank-transactions', 'banking-cards', 'intercompany-balances',
-  ]) {
-    qc.invalidateQueries({ queryKey: [key] });
-  }
 }
 
 /**

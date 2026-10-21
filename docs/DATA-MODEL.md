@@ -55,15 +55,12 @@ Balances are stored/returned as debit − credit and **presented** on the accoun
 ### Balance trigger: USD, not native (2026-09-18)
 `trg_journal_balance_on_post` was replaced by **`trg_journal_balance_on_post_usd`** (the old one is dropped by name at boot — a trigger body can't be altered in place). It blocks Draft → Posted unless `Σ(debit × exchangeRate) = Σ(credit × exchangeRate)` within half a cent, i.e. the entry balances in USD, the reporting currency. For a single-currency entry this is the old test scaled by one rate; a multi-currency manual entry (e.g. an AED line against a USD line) can only balance this way.
 
-### Correcting a posted entry: reversal, not deletion (2026-10-21)
+### Correcting a posted manual JV: reversal, not deletion (2026-10-21)
 A Posted entry is never edited or deleted — `trg_journal_lines_immutable_when_posted_{ins,upd,del}` block it at the database. The correction is a **mirror entry**: every line copied with `debit` and `credit` swapped, keeping each line's own `currency`, stamped `exchangeRate`, `brandId` and **`contactId`** (without the contact, the sub-ledger balance derived from tagged lines would never clear). Both entries stay in the books and the net effect on every balance is zero.
 
-The link between the two is a tag in the reversal's `reference`: **`[REVERSAL-OF-<original entry id>]`**, the same convention as the `[SPLIT-BT<id>-<ts>]` tag that ties the entries of one cross-entity bank posting together. It is what makes "already reversed" and "is itself a reversal" detectable without a schema change — there is no `reversedByEntryId` column.
+The link between the two is a tag in the reversal's `reference`: **`[REVERSAL-OF-<original entry id>]`**, the same convention as the `[SPLIT-BT<id>-<ts>]` tag that ties the entries of one cross-entity bank posting together. It is what makes "already reversed" and "is itself a reversal" detectable without a schema change — there is no `reversedByEntryId` column. The reversal is itself `source = 'ManualJournal'`, so it lists beside the original on the JV screen.
 
-Three cases do **not** use a reversal, because something else owns the correction:
-- a **Draft** entry is deleted outright (it was never in the books);
-- a **bank-feed** posting is unposted, which deletes its entries and returns the `bank_transactions` row to `PENDING` — categorisation is data entry, not a filed transaction;
-- a **bill or invoice** is voided through its own route, so the document's own status changes with it.
+**Scope: `source = 'ManualJournal'` only.** Every other source is corrected where it was entered, because each has a record alongside the entry that has to move with it — `BankFeed` through the banking screen's Undo (which also returns the `bank_transactions` row to `PENDING`), `AR`/`AP` by voiding the invoice or bill (which also moves the document's status). `Import` and `OpeningBalance` are not hand-entered and are not corrected one entry at a time. A **Draft** JV is deleted outright instead; it was never in the books.
 
 ### `split_rules` / `split_rule_lines` — reusable multi-entity split templates (2026-09-17)
 | Column | Type | Notes |

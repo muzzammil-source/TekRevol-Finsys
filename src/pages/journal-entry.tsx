@@ -1,9 +1,13 @@
 import React, { useMemo, useState } from 'react';
 import { format } from 'date-fns';
 import { useQueryClient } from '@tanstack/react-query';
-import { fetchExchangeRate, useCreateJournalEntry, useListAccounts, useListEntities, useListJournalEntries } from '@workspace/api-client-react';
+import { fetchExchangeRate, useCreateJournalEntry, useDeleteJournalEntry, useListAccounts, useListEntities, useListJournalEntries, useReverseJournalEntry } from '@workspace/api-client-react';
 import { PageContent, PageHeader, SurfaceCard } from '@/components/layout';
-import { Table, TableBody, TableCell, TableHeader, TableRow } from '@/components/ui/table';
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
+import {
+  AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent,
+  AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
+} from '@/components/ui/alert-dialog';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
@@ -15,7 +19,7 @@ import { GLAccountSelect } from '@/components/gl-account-select';
 import { QuickAccountDialog } from '@/components/quick-account-dialog';
 import { ResizableColGroup, ResizableHeaderCells, defaultWidths, useResizableColumns, type ResizableColumnDef } from '@/components/resizable-columns';
 import { invalidateLedgerDerivedQueries } from '@/lib/ledger-queries';
-import { PlusCircle, Trash2 } from 'lucide-react';
+import { PlusCircle, Trash2, Undo2 } from 'lucide-react';
 
 // Manual Journal Entry (2026-09-17). The one screen where a line hits the
 // ledger without a bank transaction behind it — corrections, accruals,
@@ -91,6 +95,129 @@ const native = (cents: number, currency: string) => {
   }
 };
 
+// Reverse (Posted) or Delete (Draft) for ONE manual journal entry
+// (2026-10-21). Lives only on this screen: a JV is entered here, so it is
+// corrected here. Bank-feed postings are undone on the banking screen and
+// bills/invoices are voided from their own, because each of those has a
+// record alongside the entry that has to move with it — the server refuses
+// them too, this is not just a UI choice.
+//
+// Reversing is not deleting. A posted entry is the book of record, so the
+// correction is a mirror entry posted beside it: both halves stay visible
+// and the net effect on every balance is zero.
+function JournalEntryAction({
+  entry,
+  isReversal,
+  reversedByEntryNumber,
+  onDone,
+}: {
+  entry: any;
+  isReversal: boolean;
+  reversedByEntryNumber?: string;
+  onDone: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const { toast } = useToast();
+  const { can } = useAuth();
+  const reverse = useReverseJournalEntry();
+  const remove = useDeleteJournalEntry();
+
+  const isDraft = entry.status !== 'Posted';
+  const busy = reverse.isPending || remove.isPending;
+  // Posting is what a reversal does, so the same capability gates both.
+  // Without it the column is simply empty rather than offering a 403.
+  if (!can('post')) return null;
+  // Already-corrected entries have nothing left to do: reversing a reversal
+  // only re-posts the original, and reversing twice is refused server-side.
+  if (!isDraft && (isReversal || reversedByEntryNumber)) {
+    return (
+      <span className="text-[11px] text-muted-foreground" title={reversedByEntryNumber ? `Reversed by ${reversedByEntryNumber}` : 'This entry is a reversal'}>
+        —
+      </span>
+    );
+  }
+
+  return (
+    <>
+      <Button
+        variant="ghost"
+        size="sm"
+        className="h-7 px-2 text-xs text-muted-foreground hover:text-rose-700"
+        onClick={() => setOpen(true)}
+        disabled={busy}
+        data-jv-action={isDraft ? 'delete' : 'reverse'}
+        data-jv-entry={entry.entryNumber}
+      >
+        {isDraft ? <Trash2 className="mr-1 h-3.5 w-3.5" /> : <Undo2 className="mr-1 h-3.5 w-3.5" />}
+        {isDraft ? 'Delete' : 'Reverse'}
+      </Button>
+
+      <AlertDialog open={open} onOpenChange={setOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              {isDraft ? `Delete draft ${entry.entryNumber}?` : `Reverse ${entry.entryNumber}?`}
+            </AlertDialogTitle>
+            <AlertDialogDescription asChild>
+              <div className="space-y-2 text-sm">
+                {isDraft ? (
+                  <p>This draft was never posted, so nothing in the books changes. It is removed along with its lines.</p>
+                ) : (
+                  <>
+                    <p>
+                      This posts a <strong>mirror entry</strong> dated today, with every debit and credit
+                      swapped. The original stays in the books and both entries remain visible — that is how a
+                      posted entry is corrected, so the audit trail is never broken.
+                    </p>
+                    <p className="text-muted-foreground">
+                      Net effect on every balance, report and statement is zero. Nothing is deleted.
+                    </p>
+                  </>
+                )}
+                <p className="rounded border bg-muted/40 px-2 py-1 font-mono text-[11px]">
+                  {entry.transactionDate} · {entry.description || 'journal entry'}
+                </p>
+              </div>
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={busy}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              disabled={busy}
+              onClick={(ev) => {
+                // Held open until the server answers, so a refusal is read
+                // in place instead of the dialog vanishing on a failure.
+                ev.preventDefault();
+                const done = (title: string, description: string) => {
+                  setOpen(false);
+                  onDone();
+                  toast({ title, description });
+                };
+                const failed = (title: string) => (err: any) =>
+                  toast({ title, description: err.message, variant: 'destructive' });
+
+                if (isDraft) {
+                  remove.mutate({ id: entry.id }, {
+                    onSuccess: () => done(`Deleted ${entry.entryNumber}`, 'The draft and its lines are gone. Nothing was posted, so no balance moved.'),
+                    onError: failed(`Could not delete ${entry.entryNumber}`),
+                  });
+                } else {
+                  reverse.mutate({ id: entry.id }, {
+                    onSuccess: (res) => done(`Reversed ${entry.entryNumber}`, `Posted ${res.reversalEntryNumber} as its mirror. Both entries stay in the books.`),
+                    onError: failed(`Could not reverse ${entry.entryNumber}`),
+                  });
+                }
+              }}
+            >
+              {busy ? (isDraft ? 'Deleting…' : 'Reversing…') : isDraft ? 'Delete draft' : 'Post reversal'}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </>
+  );
+}
+
 export default function JournalEntryPage() {
   const { toast } = useToast();
   const queryClient = useQueryClient();
@@ -104,10 +231,22 @@ export default function JournalEntryPage() {
   const { data: accountsData } = useListAccounts();
   const accounts = useMemo(() => (accountsData || []) as any[], [accountsData]);
   const { data: recentData } = useListJournalEntries();
-  const recent = useMemo(
-    () => ((recentData || []) as any[]).filter((e) => e.source === 'ManualJournal').slice(0, 5),
+  const manualEntries = useMemo(
+    () => ((recentData || []) as any[]).filter((e) => e.source === 'ManualJournal'),
     [recentData],
   );
+  const recent = useMemo(() => manualEntries.slice(0, 15), [manualEntries]);
+  // originalId -> the reversal that already cancels it. Built from the
+  // [REVERSAL-OF-n] tag in the reference (there is no column for it), so a
+  // reversed entry can say so and stop offering to reverse it again.
+  const reversalByOriginalId = useMemo(() => {
+    const map = new Map<number, any>();
+    for (const e of manualEntries) {
+      const m = String(e.reference || '').match(/\[REVERSAL-OF-(\d+)\]/);
+      if (m && e.status === 'Posted') map.set(Number(m[1]), e);
+    }
+    return map;
+  }, [manualEntries]);
 
   const defaultEntityId = entities[0] ? String(entities[0].id) : '';
   const [transactionDate, setTransactionDate] = useState(format(new Date(), 'yyyy-MM-dd'));
@@ -459,18 +598,76 @@ export default function JournalEntryPage() {
 
         {recent.length > 0 && (
           <SurfaceCard>
-            <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Recent manual entries</div>
-            <div className="space-y-1.5">
-              {recent.map((e) => (
-                <div key={e.id} className="flex flex-wrap items-center gap-2 text-xs" data-recent-entry={e.entryNumber}>
-                  <span className="font-mono text-muted-foreground">{e.transactionDate}</span>
-                  <span className="font-mono font-medium">{e.entryNumber}</span>
-                  <Badge variant="outline" className="border-transparent bg-muted text-[10px]">
-                    {entityLabel(entities.find((x) => x.id === e.entityId)?.name || `Entity ${e.entityId}`)}
-                  </Badge>
-                  <span className="min-w-0 truncate text-muted-foreground">{e.description}</span>
-                </div>
-              ))}
+            <div className="mb-2 flex items-baseline justify-between gap-3">
+              <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Manual journal entries</div>
+              <div className="text-[11px] text-muted-foreground">
+                Posted entries are corrected by posting a reversal, never by editing or deleting them.
+              </div>
+            </div>
+            <div className="overflow-x-auto">
+              <Table className="table-fixed min-w-[760px]">
+                <colgroup>
+                  <col className="w-[96px]" />
+                  <col className="w-[128px]" />
+                  <col className="w-[120px]" />
+                  <col />
+                  <col className="w-[84px]" />
+                  <col className="w-[96px]" />
+                </colgroup>
+                <TableHeader>
+                  <TableRow className="hover:bg-transparent">
+                    <TableHead className="text-xs">Date</TableHead>
+                    <TableHead className="text-xs">Entry #</TableHead>
+                    <TableHead className="text-xs">Entity</TableHead>
+                    <TableHead className="text-xs">Description</TableHead>
+                    <TableHead className="text-xs">Status</TableHead>
+                    <TableHead className="text-xs text-right">Action</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {recent.map((e) => {
+                    const isReversal = /\[REVERSAL-OF-\d+\]/.test(String(e.reference || ''));
+                    const reversedBy = reversalByOriginalId.get(e.id);
+                    return (
+                      <TableRow key={e.id} data-recent-entry={e.entryNumber}>
+                        <TableCell className="font-mono text-xs text-muted-foreground whitespace-nowrap">{e.transactionDate}</TableCell>
+                        <TableCell className="font-mono text-xs font-medium whitespace-nowrap truncate">{e.entryNumber}</TableCell>
+                        <TableCell className="truncate">
+                          <Badge variant="outline" className="border-transparent bg-muted text-[10px]">
+                            {entityLabel(entities.find((x) => x.id === e.entityId)?.name || `Entity ${e.entityId}`)}
+                          </Badge>
+                        </TableCell>
+                        <TableCell className="min-w-0 text-xs text-muted-foreground">
+                          <div className="truncate" title={e.description}>{e.description}</div>
+                        </TableCell>
+                        <TableCell>
+                          {/* A reversed entry is still Posted — the books
+                              keep both halves — so the status column says
+                              which half this is rather than implying the
+                              original went away. */}
+                          {e.status !== 'Posted' ? (
+                            <Badge variant="outline" className="text-[10px]">{e.status}</Badge>
+                          ) : isReversal ? (
+                            <Badge variant="outline" className="border-transparent bg-amber-50 text-[10px] text-amber-800">Reversal</Badge>
+                          ) : reversedBy ? (
+                            <Badge variant="outline" className="border-transparent bg-slate-100 text-[10px] text-slate-700" title={`Reversed by ${reversedBy.entryNumber}`}>Reversed</Badge>
+                          ) : (
+                            <Badge variant="outline" className="border-transparent bg-emerald-50 text-[10px] text-emerald-800">Posted</Badge>
+                          )}
+                        </TableCell>
+                        <TableCell className="text-right">
+                          <JournalEntryAction
+                            entry={e}
+                            isReversal={isReversal}
+                            reversedByEntryNumber={reversedBy?.entryNumber}
+                            onDone={() => invalidateLedgerDerivedQueries(queryClient)}
+                          />
+                        </TableCell>
+                      </TableRow>
+                    );
+                  })}
+                </TableBody>
+              </Table>
             </div>
           </SurfaceCard>
         )}

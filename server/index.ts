@@ -2188,33 +2188,34 @@ app.post("/api/journal-entries", (req, res) => {
   }
 });
 
-// Reversing and deleting journal entries (2026-10-21).
+// Reversing and deleting MANUAL journal entries (2026-10-21).
 //
-// The two verbs are deliberately NOT interchangeable, and which one is
-// allowed depends entirely on whether the entry has already hit the books:
+// Scope: `source = 'ManualJournal'` only — the entries the Journal Entry
+// (JV) screen creates. Every other source is corrected where it was
+// entered, by a path that also updates whatever sits alongside the entry:
+//   - BankFeed  → Undo on the Posted tab of the banking screen, which also
+//                 returns the bank_transactions row to PENDING;
+//   - AR / AP   → void the invoice or bill, which also moves the document's
+//                 own status;
+//   - Import / Opening → neither is hand-entered, so neither is corrected
+//                 one entry at a time.
+// Allowing those here would leave the other half of each pair untouched, so
+// they are refused with the screen to use instead.
 //
-//  - A **Draft** entry is not in the books yet, so DELETE removes it
-//    outright. Nothing was ever reported from it; there is nothing to
-//    preserve.
-//  - A **Posted** entry is a legal book record (CLAUDE.md §0, and the
-//    trg_journal_lines_immutable_when_posted_* triggers that enforce it).
-//    It is corrected by POSTING A MIRROR REVERSAL and keeping both sides,
-//    exactly as voidBill/voidInvoice already do — never by deleting it.
-//    Deleting posted history would silently change figures in statements
-//    that have already been filed or shown to someone, with no trace that
-//    anything was ever there.
-//
-// The one exception is a bank-feed posting, which has its own undo path
-// (unpostBankTransactionRow): there, categorisation is data entry rather
-// than a filed transaction, so a mis-picked account is a typo and gets
-// deleted outright with the feed row returned to PENDING. DELETE on such
-// an entry routes into that already-guarded path instead of growing a
-// second copy of its rules.
+// Posted vs Draft decides the verb:
+//   - A **Draft** JV is not in the books, so DELETE removes it outright.
+//   - A **Posted** JV is a legal book record (CLAUDE.md §0, and the
+//     trg_journal_lines_immutable_when_posted_* triggers that enforce it),
+//     so it is corrected by POSTING A MIRROR and keeping both sides —
+//     exactly as voidBill/voidInvoice do. Deleting posted history would
+//     silently change figures in statements already filed or shown to
+//     someone, leaving no trace anything was there.
 //
 // Nothing here touches a stored balance, because no balance is stored
 // (CLAUDE.md rule 3) — every account balance, trial balance and statement
 // figure is summed from Posted journal_lines at read time, so posting the
 // reversal *is* the balance update.
+const MANUAL_JOURNAL_SOURCE = "ManualJournal";
 const REVERSAL_TAG = (originalId: number) => `[REVERSAL-OF-${originalId}]`;
 
 /** The entry this one reverses, if it is itself a reversal. */
@@ -2232,13 +2233,21 @@ function existingReversalOf(entryId: number): any | null {
   );
 }
 
-/** The bank-feed row a journal entry was posted from, if any. */
-function bankTransactionForEntry(entryId: number): any | null {
-  return (db.prepare("SELECT * FROM bank_transactions WHERE journalEntryId = ?").get(entryId) as any) || null;
+/** Where a non-manual entry has to be corrected instead, in plain words. */
+function correctElsewhereMessage(entry: any): string {
+  const where: Record<string, string> = {
+    BankFeed: 'Use "Undo" on the Posted tab of the banking screen — that also returns the transaction to the pending feed.',
+    AR: "Void the invoice from the invoice screen, so the invoice's own status is updated too.",
+    AP: "Void the bill from the bill screen, so the bill's own status is updated too.",
+    Import: "Imported entries are corrected by re-importing the batch, not one entry at a time.",
+    OpeningBalance: "An opening balance is corrected by editing the opening balance it came from.",
+  };
+  const hint = where[String(entry.source)] || "It was not entered here, so it has to be corrected where it was entered.";
+  return `Entry ${entry.entryNumber} is not a manual journal entry (source: ${entry.source}). ${hint}`;
 }
 
 /**
- * Posts a mirror-image reversal of a Posted entry and returns both ids.
+ * Posts a mirror-image reversal of a Posted manual JV and returns both ids.
  *
  * The reversal copies every original line with debit and credit swapped,
  * keeping the line's own currency, stamped exchangeRate, brand AND
@@ -2257,6 +2266,7 @@ function reverseJournalEntryRow(
   if (!entry) throw new PostingError(404, `Journal entry ${id} not found`);
   assertEntityAccess(req, entry.entityId, "this entry's entity");
 
+  if (entry.source !== MANUAL_JOURNAL_SOURCE) throw new PostingError(409, correctElsewhereMessage(entry));
   if (entry.status !== "Posted") {
     throw new PostingError(
       400,
@@ -2272,24 +2282,6 @@ function reverseJournalEntryRow(
   const already = existingReversalOf(id);
   if (already) {
     throw new PostingError(409, `Entry ${entry.entryNumber} has already been reversed by ${already.entryNumber}.`);
-  }
-  // AR/AP entries carry an invoice/bill status alongside them. Reversing the
-  // entry on its own would leave that document still saying OPEN/PAID, so
-  // those have to go through their own void route, which does both halves.
-  const bill = db.prepare("SELECT id, billNumber FROM bills WHERE journalEntryId = ?").get(id) as any;
-  const invoice = db.prepare("SELECT id, invoiceNumber FROM invoices WHERE journalEntryId = ?").get(id) as any;
-  if (bill) {
-    throw new PostingError(409, `Entry ${entry.entryNumber} is bill ${bill.billNumber}. Void the bill instead, so the bill's own status is updated too.`);
-  }
-  if (invoice) {
-    throw new PostingError(409, `Entry ${entry.entryNumber} is invoice ${invoice.invoiceNumber}. Void the invoice instead, so the invoice's own status is updated too.`);
-  }
-  const feedRow = bankTransactionForEntry(id);
-  if (feedRow) {
-    throw new PostingError(
-      409,
-      `Entry ${entry.entryNumber} was posted from a bank transaction. Use "Undo" on the Posted tab of the banking screen — that removes the posting and returns the transaction to the pending feed, which is what you want for a mis-categorised bank row.`,
-    );
   }
 
   const reversalDate = String(opts.reversalDate || todayIso()).trim();
@@ -2311,7 +2303,7 @@ function reverseJournalEntryRow(
       ? String(opts.memo).trim()
       : `Reversal of ${entry.entryNumber} — ${entry.description || "journal entry"}`,
     reference: `${REVERSAL_TAG(id)} ${entry.reference || ""}`.trim(),
-    source: entry.source || "Manual",
+    source: MANUAL_JOURNAL_SOURCE,
   });
   // Carried over so the reversal is reported in the same buckets as the
   // original: the accounting period follows the reversal's own date, but
@@ -2360,7 +2352,7 @@ function reverseJournalEntryRow(
   };
 }
 
-// Reverse a posted entry: POST /api/journal-entries/:id/reverse
+// Reverse a posted manual JV: POST /api/journal-entries/:id/reverse
 app.post("/api/journal-entries/:id/reverse", (req, res) => {
   try {
     const run = db.transaction(() => reverseJournalEntryRow(req, Number(req.params.id), req.body || {}));
@@ -2370,12 +2362,10 @@ app.post("/api/journal-entries/:id/reverse", (req, res) => {
   }
 });
 
-// Delete an entry: DELETE /api/journal-entries/:id
+// Delete a DRAFT manual JV: DELETE /api/journal-entries/:id
 //
-// Draft only, with one exception — an entry posted from the bank feed is
-// handed to the bank-feed undo path, which deletes it and returns the
-// transaction to PENDING. A Posted entry with no bank row is refused and
-// pointed at /reverse.
+// Draft only. A posted JV is refused and pointed at /reverse; a non-manual
+// entry is refused and pointed at the screen that owns it.
 app.delete("/api/journal-entries/:id", (req, res) => {
   const id = Number(req.params.id);
   try {
@@ -2383,19 +2373,8 @@ app.delete("/api/journal-entries/:id", (req, res) => {
     if (!entry) return res.status(404).json({ error: `Journal entry ${id} not found` });
     assertEntityAccess(req, entry.entityId, "this entry's entity");
 
+    if (entry.source !== MANUAL_JOURNAL_SOURCE) return res.status(409).json({ error: correctElsewhereMessage(entry) });
     if (entry.status === "Posted") {
-      const feedRow = bankTransactionForEntry(id);
-      if (feedRow) {
-        const run = db.transaction(() => unpostBankTransactionRow(req, feedRow.id));
-        const out = run();
-        return res.json({
-          deleted: true,
-          via: "bank-unpost",
-          bankTransactionId: feedRow.id,
-          removedJournalEntryIds: out.entryIds,
-          message: `Removed the posting and returned bank transaction ${feedRow.id} to the pending feed.`,
-        });
-      }
       return res.status(409).json({
         error: `Entry ${entry.entryNumber} is posted, so it can't be deleted — posted entries are the book of record. Reverse it instead and both sides stay visible.`,
         reverseWith: `/api/journal-entries/${id}/reverse`,
@@ -2411,7 +2390,7 @@ app.delete("/api/journal-entries/:id", (req, res) => {
       db.prepare("DELETE FROM journal_entries WHERE id = ?").run(id);
     });
     run();
-    res.json({ deleted: true, via: "draft-delete", entryId: id, entryNumber: entry.entryNumber });
+    res.json({ deleted: true, entryId: id, entryNumber: entry.entryNumber });
   } catch (err: any) {
     res.status(hasHttpStatus(err) ? err.status : 500).json({ error: err.message || "Could not delete the journal entry" });
   }
@@ -7117,8 +7096,7 @@ app.get("/api/accounts/:id/register", (req, res) => {
   const rows = (db
     .prepare(
       `SELECT jl.id, jl.debit, jl.credit, jl.memo, jl.currency, jl.exchangeRate, jl.brandId,
-              je.id as journalEntryId, je.entryNumber, je.transactionDate, je.description, je.reference, je.entityId,
-              je.source
+              je.id as journalEntryId, je.entryNumber, je.transactionDate, je.description, je.reference, je.entityId
        FROM journal_lines jl
        JOIN journal_entries je ON je.id = jl.journalEntryId
        WHERE jl.accountId = ? AND je.status = 'Posted'

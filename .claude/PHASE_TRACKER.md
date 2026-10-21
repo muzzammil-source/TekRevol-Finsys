@@ -4773,3 +4773,54 @@ server's message verbatim with the dialog left open.
 
 **Not built:** a list of Draft entries anywhere in the UI. `DELETE` handles
 drafts, but nothing on screen shows them, so that path is API-only for now.
+
+---
+
+## 2026-10-21 (later) — Reverse/Delete narrowed to manual JVs only
+
+Supersedes the entry above. The earlier version put a Reverse button on the
+General Ledger and the Chart of Accounts register; that was **reverted** —
+both files are byte-identical to their pre-feature state (`git checkout
+de510e2 -- …`), `src/components/reverse-entry-action.tsx` is deleted, and
+the `je.source` column added to `GET /api/accounts/:id/register` is backed
+out. Verified in the browser: zero reverse controls on either screen, and
+the GL is back to its original nine columns.
+
+**Scope now:** `source = 'ManualJournal'` only, enforced **server-side**,
+not just by where the button is drawn. Every other source is refused `409`
+with the screen that owns it, because each has a record alongside the entry
+that must move with it:
+- `BankFeed` → Undo on the banking screen (also returns the row to PENDING)
+- `AR` / `AP` → void the invoice/bill (also moves the document's status)
+- `Import` / `OpeningBalance` → not hand-entered, not corrected one at a time
+
+**Where it lives:** the Journal Entry (JV) screen's "Recent manual entries"
+list became a proper **Manual journal entries** table — Date, Entry #,
+Entity, Description, Status, Action — showing 15 rows. Posted rows offer
+**Reverse**, Draft rows offer **Delete**, and a row that is already a
+reversal or has already been reversed shows no action at all. Status reads
+`Posted` / `Reversal` / `Reversed`, derived from the `[REVERSAL-OF-n]` tag
+(a reversed entry is still Posted — the books keep both halves).
+
+Also cleaned up: the duplicate query-invalidation helper added to the
+api-client package was removed in favour of the existing
+`invalidateLedgerDerivedQueries` in `src/lib/ledger-queries.ts`, which the
+rest of the app already uses.
+
+**Verified** on an isolated copy of the dev ledger — 25 checks, all passing:
+reversing a JV returns both accounts to their exact pre-entry balances with
+the trial balance equal and the original still Posted; the mirror has every
+line swapped, carries the contact tag, and is itself a `ManualJournal`
+entry; reversing twice and reversing a reversal are refused without writing;
+DELETE on a posted JV is refused naming `/reverse`; **every non-manual
+source is refused on both verbs and no bank row is touched**; reversing a
+draft is refused `400` while deleting it takes its lines and allocation row;
+zero orphans and nothing unbalanced throughout.
+
+Exercised end-to-end in the browser on the dev server: created a JV,
+reversed it from the JV table, and watched the list refresh to show the new
+`Reversal` row and the original flip to `Reversed`, both with no further
+action offered. The test entries and the temporary dev login were removed
+afterwards; the dev trial balance is back to its pre-test figure.
+
+`pnpm run typecheck` clean, 25/25 tests pass, `pnpm run build` clean.
