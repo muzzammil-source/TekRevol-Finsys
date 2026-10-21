@@ -9,6 +9,7 @@ import { Button } from '@/components/ui/button';
 import { PlusCircle, Pencil, Trash2, Download, Upload, Search, X, ChevronDown, MoreHorizontal, BookOpen } from 'lucide-react';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription } from '@/components/ui/dialog';
+import { ReverseEntryAction } from '@/components/reverse-entry-action';
 import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from '@/components/ui/form';
 import { Input } from '@/components/ui/input';
 import { Checkbox } from '@/components/ui/checkbox';
@@ -368,7 +369,7 @@ function AccountRegisterModal({ account, onOpenChange, entityId, entityName }: {
         </DialogHeader>
         <div className="max-h-[60vh] overflow-y-auto border rounded-md">
           {/* Same fixed column geometry as the General Ledger report. */}
-          <Table className="table-fixed min-w-[700px]">
+          <Table className="table-fixed min-w-[752px]">
             <colgroup>
               <col className="w-[100px]" />
               <col className="w-[120px]" />
@@ -376,6 +377,7 @@ function AccountRegisterModal({ account, onOpenChange, entityId, entityName }: {
               <col className="w-[110px]" />
               <col className="w-[110px]" />
               <col className="w-[120px]" />
+              <col className="w-[52px]" />
             </colgroup>
             <TableHeader>
               <TableRow>
@@ -385,13 +387,14 @@ function AccountRegisterModal({ account, onOpenChange, entityId, entityName }: {
                 <TableHead className="text-xs text-right">Debit</TableHead>
                 <TableHead className="text-xs text-right">Credit</TableHead>
                 <TableHead className="text-xs text-right">Balance</TableHead>
+                <TableHead className="text-xs sr-only">Actions</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
               {isLoading ? (
-                <TableRow><TableCell colSpan={6} className="text-center py-6 text-muted-foreground text-sm">Loading…</TableCell></TableRow>
+                <TableRow><TableCell colSpan={7} className="text-center py-6 text-muted-foreground text-sm">Loading…</TableCell></TableRow>
               ) : lines.length === 0 ? (
-                <TableRow><TableCell colSpan={6} className="text-center py-6 text-muted-foreground font-mono text-sm">No posted activity for this account</TableCell></TableRow>
+                <TableRow><TableCell colSpan={7} className="text-center py-6 text-muted-foreground font-mono text-sm">No posted activity for this account</TableCell></TableRow>
               ) : (
                 lines.map((l) => (
                   <TableRow key={l.id}>
@@ -410,6 +413,18 @@ function AccountRegisterModal({ account, onOpenChange, entityId, entityName }: {
                       const shown = naturalBalance(account?.type, l.runningBalanceUSD);
                       return <TableCell className={`text-right font-mono text-xs tabular-nums whitespace-nowrap ${shown < 0 ? 'text-red-700' : ''}`}>{formatMoney(shown)}</TableCell>;
                     })()}
+                    {/* Same operation as the General Ledger's — a register
+                        row IS a posted journal line, so the correction is a
+                        mirror entry, never an edit of what is here. */}
+                    <TableCell className="px-1">
+                      <ReverseEntryAction
+                        journalEntryId={l.journalEntryId}
+                        entryNumber={l.entryNumber}
+                        description={l.memo || l.description}
+                        transactionType={l.source}
+                        compact
+                      />
+                    </TableCell>
                   </TableRow>
                 ))
               )}

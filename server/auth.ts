@@ -183,6 +183,11 @@ const RULES: Rule[] = [
   // Manual journal entries hit the ledger directly — same capability as
   // posting a bank transaction; entity access is checked per line inside.
   R("POST", /^\/api\/journal-entries$/, "post"),
+  // Reversing a posted entry POSTS a new mirror entry, and deleting a draft
+  // removes one — both change the ledger, so both need `post`, not `admin`.
+  // Entity access is checked inside against the entry's own entity.
+  R("POST", /^\/api\/journal-entries\/\d+\/reverse$/, "post"),
+  R("DELETE", /^\/api\/journal-entries\/\d+$/, "post"),
   // Split rules are configuration that spans entities: anyone may read them,
   // only an Admin with every entity may change them.
   R("GET", /^\/api\/split-rules$/, "read"),

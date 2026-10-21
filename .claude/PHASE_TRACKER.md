@@ -4709,3 +4709,67 @@ three posted rows in:
 This commit touches `server/`, so it will deploy — but the pattern should be
 cleared in the Railway dashboard or the next UI-only change will silently
 not ship.
+
+---
+
+## 2026-10-21 — Reversing and deleting journal entries (UI + API)
+
+Asked for as "delete/reverse recorded journal entries". Built as a
+**reversal**, because a posted entry is the book of record (§0) and the
+`trg_journal_lines_immutable_when_posted_*` triggers already refuse to let
+one be edited or deleted. Deleting posted history would silently change
+figures in statements already shown to someone, with no trace.
+
+**Built**
+- `POST /api/journal-entries/:id/reverse` — posts a mirror of a Posted
+  entry: every line copied with debit and credit swapped, keeping the
+  line's own currency, stamped `exchangeRate`, `brandId` and `contactId`.
+  The reversal is tied to the original by a `[REVERSAL-OF-<id>]` tag in its
+  `reference` (same idea as `[SPLIT-BT…]`; **no schema change**). Refused
+  `409` when the entry is itself a reversal, is already reversed, backs a
+  bill/invoice (void those — they own their document status), or was posted
+  from the bank feed (unpost that instead).
+- `DELETE /api/journal-entries/:id` — Draft deleted outright (lines and
+  `journal_line_allocations` with it). Posted is refused `409` with
+  `reverseWith` naming the reverse endpoint, **except** a bank-feed posting,
+  which routes into `unpostBankTransactionRow` so the feed row returns to
+  `PENDING` — the behaviour originally asked for, reusing the path verified
+  the same day rather than growing a second copy of its guards.
+- Both gated `post` in `server/auth.ts`, entity-checked against the entry.
+- `useReverseJournalEntry` / `useDeleteJournalEntry`, both invalidating
+  every derived ledger view (register, trial balance, statements, GL,
+  sub-ledger, banking) — nothing stores a balance, so a refetch IS the
+  recalculation.
+- `<ReverseEntryAction>` (`src/components/reverse-entry-action.tsx`) with an
+  AlertDialog that states plainly that nothing is deleted. Wired into the
+  **General Ledger** (new non-resizable actions column; widths key bumped to
+  `finsys.gl.columns.v3`) and the **Chart of Accounts → View register**
+  drill-down. Hidden entirely without the `post` capability.
+- `GET /api/accounts/:id/register` now also returns `je.source`.
+
+**No "update account balances" step exists, by design.** No balance is
+stored (rule 3) — every figure is summed from Posted lines at read time, so
+posting the reversal *is* the balance update.
+
+**Verified** on an isolated copy of the dev ledger (throwaway stack, spare
+port, deleted afterwards) — 25 checks, all passing:
+- reversing a manual entry returns both accounts to their exact pre-entry
+  balances, leaves the trial balance equal, keeps the original Posted, and
+  produces a mirror whose every line has debit/credit swapped **and the
+  contact tag carried over**;
+- reversing twice → `409`; reversing a reversal → `409`; both write nothing;
+- `DELETE` on a posted non-bank entry → `409` naming `/reverse`, entry still
+  there; on a bank-feed entry → unposted, row back to `PENDING`, entry gone;
+- deleting a Draft takes its lines and its allocation row, leaves the trial
+  balance untouched, and `404` for an unknown id;
+- throughout: zero orphaned lines, zero orphaned allocations, zero dangling
+  feed links, zero unbalanced posted entries.
+
+Also exercised in the browser against the dev server: both screens render
+the action, the dialog opens, and a refusal (bank-feed entry) surfaces the
+server's message verbatim with the dialog left open.
+
+`pnpm run typecheck` clean, 25/25 tests pass, `pnpm run build` clean.
+
+**Not built:** a list of Draft entries anywhere in the UI. `DELETE` handles
+drafts, but nothing on screen shows them, so that path is API-only for now.

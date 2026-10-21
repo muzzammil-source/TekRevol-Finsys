@@ -2188,6 +2188,235 @@ app.post("/api/journal-entries", (req, res) => {
   }
 });
 
+// Reversing and deleting journal entries (2026-10-21).
+//
+// The two verbs are deliberately NOT interchangeable, and which one is
+// allowed depends entirely on whether the entry has already hit the books:
+//
+//  - A **Draft** entry is not in the books yet, so DELETE removes it
+//    outright. Nothing was ever reported from it; there is nothing to
+//    preserve.
+//  - A **Posted** entry is a legal book record (CLAUDE.md §0, and the
+//    trg_journal_lines_immutable_when_posted_* triggers that enforce it).
+//    It is corrected by POSTING A MIRROR REVERSAL and keeping both sides,
+//    exactly as voidBill/voidInvoice already do — never by deleting it.
+//    Deleting posted history would silently change figures in statements
+//    that have already been filed or shown to someone, with no trace that
+//    anything was ever there.
+//
+// The one exception is a bank-feed posting, which has its own undo path
+// (unpostBankTransactionRow): there, categorisation is data entry rather
+// than a filed transaction, so a mis-picked account is a typo and gets
+// deleted outright with the feed row returned to PENDING. DELETE on such
+// an entry routes into that already-guarded path instead of growing a
+// second copy of its rules.
+//
+// Nothing here touches a stored balance, because no balance is stored
+// (CLAUDE.md rule 3) — every account balance, trial balance and statement
+// figure is summed from Posted journal_lines at read time, so posting the
+// reversal *is* the balance update.
+const REVERSAL_TAG = (originalId: number) => `[REVERSAL-OF-${originalId}]`;
+
+/** The entry this one reverses, if it is itself a reversal. */
+function reversalTargetOf(entry: any): number | null {
+  const m = String(entry?.reference || "").match(/\[REVERSAL-OF-(\d+)\]/);
+  return m ? Number(m[1]) : null;
+}
+
+/** An existing Posted reversal of this entry, if one has already been made. */
+function existingReversalOf(entryId: number): any | null {
+  return (
+    (db
+      .prepare("SELECT id, entryNumber FROM journal_entries WHERE reference LIKE ? AND status = 'Posted'")
+      .get(`%${REVERSAL_TAG(entryId)}%`) as any) || null
+  );
+}
+
+/** The bank-feed row a journal entry was posted from, if any. */
+function bankTransactionForEntry(entryId: number): any | null {
+  return (db.prepare("SELECT * FROM bank_transactions WHERE journalEntryId = ?").get(entryId) as any) || null;
+}
+
+/**
+ * Posts a mirror-image reversal of a Posted entry and returns both ids.
+ *
+ * The reversal copies every original line with debit and credit swapped,
+ * keeping the line's own currency, stamped exchangeRate, brand AND
+ * contactId — the contact matters, because a sub-ledger balance is derived
+ * from tagged Posted lines (see the contacts table comment above). Drop the
+ * contact on the reversal and the vendor keeps looking owed forever.
+ *
+ * Performs no transaction of its own; the caller sets the boundary.
+ */
+function reverseJournalEntryRow(
+  req: express.Request,
+  id: number,
+  opts: { reversalDate?: string; memo?: string } = {},
+): { originalEntryId: number; reversalEntryId: number; reversalEntryNumber: string } {
+  const entry = db.prepare("SELECT * FROM journal_entries WHERE id = ?").get(id) as any;
+  if (!entry) throw new PostingError(404, `Journal entry ${id} not found`);
+  assertEntityAccess(req, entry.entityId, "this entry's entity");
+
+  if (entry.status !== "Posted") {
+    throw new PostingError(
+      400,
+      `Entry ${entry.entryNumber} is a ${String(entry.status).toLowerCase()}, not posted — delete it instead of reversing it.`,
+    );
+  }
+  if (reversalTargetOf(entry) !== null) {
+    throw new PostingError(
+      409,
+      `Entry ${entry.entryNumber} is itself a reversal. Reversing a reversal just re-posts the original — enter it again instead.`,
+    );
+  }
+  const already = existingReversalOf(id);
+  if (already) {
+    throw new PostingError(409, `Entry ${entry.entryNumber} has already been reversed by ${already.entryNumber}.`);
+  }
+  // AR/AP entries carry an invoice/bill status alongside them. Reversing the
+  // entry on its own would leave that document still saying OPEN/PAID, so
+  // those have to go through their own void route, which does both halves.
+  const bill = db.prepare("SELECT id, billNumber FROM bills WHERE journalEntryId = ?").get(id) as any;
+  const invoice = db.prepare("SELECT id, invoiceNumber FROM invoices WHERE journalEntryId = ?").get(id) as any;
+  if (bill) {
+    throw new PostingError(409, `Entry ${entry.entryNumber} is bill ${bill.billNumber}. Void the bill instead, so the bill's own status is updated too.`);
+  }
+  if (invoice) {
+    throw new PostingError(409, `Entry ${entry.entryNumber} is invoice ${invoice.invoiceNumber}. Void the invoice instead, so the invoice's own status is updated too.`);
+  }
+  const feedRow = bankTransactionForEntry(id);
+  if (feedRow) {
+    throw new PostingError(
+      409,
+      `Entry ${entry.entryNumber} was posted from a bank transaction. Use "Undo" on the Posted tab of the banking screen — that removes the posting and returns the transaction to the pending feed, which is what you want for a mis-categorised bank row.`,
+    );
+  }
+
+  const reversalDate = String(opts.reversalDate || todayIso()).trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(reversalDate)) throw new PostingError(400, "reversalDate must be YYYY-MM-DD");
+  // Both ends: the period the original sits in and the period the reversal
+  // lands in must be open, or the reversal would change a closed period.
+  assertPeriodNotLocked(entry.entityId, entry.transactionDate);
+  assertPeriodNotLocked(entry.entityId, reversalDate);
+
+  const lines = db.prepare("SELECT * FROM journal_lines WHERE journalEntryId = ? ORDER BY id").all(id) as any[];
+  if (lines.length === 0) throw new PostingError(409, `Entry ${entry.entryNumber} has no lines to reverse.`);
+
+  const reversalEntryId = createDraftJournalEntry({
+    entityId: entry.entityId,
+    brandId: entry.brandId,
+    transactionDate: reversalDate,
+    postingDate: reversalDate,
+    description: opts.memo
+      ? String(opts.memo).trim()
+      : `Reversal of ${entry.entryNumber} — ${entry.description || "journal entry"}`,
+    reference: `${REVERSAL_TAG(id)} ${entry.reference || ""}`.trim(),
+    source: entry.source || "Manual",
+  });
+  // Carried over so the reversal is reported in the same buckets as the
+  // original: the accounting period follows the reversal's own date, but
+  // the inter-entity charge and contact stamp describe the same fact.
+  db.prepare(
+    "UPDATE journal_entries SET accountingPeriod = ?, chargedToEntityId = ?, contactId = ?, contactType = ? WHERE id = ?",
+  ).run(
+    statutoryPeriodOf(reversalDate),
+    entry.chargedToEntityId ?? null,
+    entry.contactId ?? null,
+    entry.contactType ?? null,
+    reversalEntryId,
+  );
+
+  const insertReversedLine = db.prepare(
+    `INSERT INTO journal_lines (journalEntryId, accountId, debit, credit, currency, exchangeRate, amountUSD, brandId, memo, contactId)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  );
+  for (const l of lines) {
+    const debit = l.credit || 0;
+    const credit = l.debit || 0;
+    const rate = l.exchangeRate || 1;
+    insertReversedLine.run(
+      reversalEntryId,
+      l.accountId,
+      debit,
+      credit,
+      l.currency || "USD",
+      rate,
+      (debit || credit) * rate,
+      l.brandId ?? null,
+      `Reversal: ${l.memo || entry.description || ""}`.trim(),
+      l.contactId ?? null,
+    );
+  }
+  // The balance trigger re-checks this on the way to Posted; a swapped copy
+  // of a balanced entry balances by construction, so a failure here means
+  // the ORIGINAL was unbalanced and should surface loudly rather than pass.
+  postJournalEntry(reversalEntryId);
+
+  const created = db.prepare("SELECT entryNumber FROM journal_entries WHERE id = ?").get(reversalEntryId) as any;
+  return {
+    originalEntryId: id,
+    reversalEntryId,
+    reversalEntryNumber: created?.entryNumber || String(reversalEntryId),
+  };
+}
+
+// Reverse a posted entry: POST /api/journal-entries/:id/reverse
+app.post("/api/journal-entries/:id/reverse", (req, res) => {
+  try {
+    const run = db.transaction(() => reverseJournalEntryRow(req, Number(req.params.id), req.body || {}));
+    res.json({ reversed: true, ...run() });
+  } catch (err: any) {
+    res.status(hasHttpStatus(err) ? err.status : 500).json({ error: err.message || "Could not reverse the journal entry" });
+  }
+});
+
+// Delete an entry: DELETE /api/journal-entries/:id
+//
+// Draft only, with one exception — an entry posted from the bank feed is
+// handed to the bank-feed undo path, which deletes it and returns the
+// transaction to PENDING. A Posted entry with no bank row is refused and
+// pointed at /reverse.
+app.delete("/api/journal-entries/:id", (req, res) => {
+  const id = Number(req.params.id);
+  try {
+    const entry = db.prepare("SELECT * FROM journal_entries WHERE id = ?").get(id) as any;
+    if (!entry) return res.status(404).json({ error: `Journal entry ${id} not found` });
+    assertEntityAccess(req, entry.entityId, "this entry's entity");
+
+    if (entry.status === "Posted") {
+      const feedRow = bankTransactionForEntry(id);
+      if (feedRow) {
+        const run = db.transaction(() => unpostBankTransactionRow(req, feedRow.id));
+        const out = run();
+        return res.json({
+          deleted: true,
+          via: "bank-unpost",
+          bankTransactionId: feedRow.id,
+          removedJournalEntryIds: out.entryIds,
+          message: `Removed the posting and returned bank transaction ${feedRow.id} to the pending feed.`,
+        });
+      }
+      return res.status(409).json({
+        error: `Entry ${entry.entryNumber} is posted, so it can't be deleted — posted entries are the book of record. Reverse it instead and both sides stay visible.`,
+        reverseWith: `/api/journal-entries/${id}/reverse`,
+      });
+    }
+
+    assertPeriodNotLocked(entry.entityId, entry.transactionDate);
+    const run = db.transaction(() => {
+      db.prepare(
+        "DELETE FROM journal_line_allocations WHERE journalLineId IN (SELECT id FROM journal_lines WHERE journalEntryId = ?)",
+      ).run(id);
+      db.prepare("DELETE FROM journal_lines WHERE journalEntryId = ?").run(id);
+      db.prepare("DELETE FROM journal_entries WHERE id = ?").run(id);
+    });
+    run();
+    res.json({ deleted: true, via: "draft-delete", entryId: id, entryNumber: entry.entryNumber });
+  } catch (err: any) {
+    res.status(hasHttpStatus(err) ? err.status : 500).json({ error: err.message || "Could not delete the journal entry" });
+  }
+});
+
 // Enriches each row with what the Bank Transactions Hub header cards need
 // beyond the raw bank_accounts columns, computed at read time (never
 // stored) per CLAUDE.md rule 3:
@@ -6888,7 +7117,8 @@ app.get("/api/accounts/:id/register", (req, res) => {
   const rows = (db
     .prepare(
       `SELECT jl.id, jl.debit, jl.credit, jl.memo, jl.currency, jl.exchangeRate, jl.brandId,
-              je.id as journalEntryId, je.entryNumber, je.transactionDate, je.description, je.reference, je.entityId
+              je.id as journalEntryId, je.entryNumber, je.transactionDate, je.description, je.reference, je.entityId,
+              je.source
        FROM journal_lines jl
        JOIN journal_entries je ON je.id = jl.journalEntryId
        WHERE jl.accountId = ? AND je.status = 'Posted'

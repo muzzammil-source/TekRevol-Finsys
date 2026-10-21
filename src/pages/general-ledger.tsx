@@ -11,6 +11,7 @@ import { showEntryMemo } from '@/lib/entry-memo';
 import { useAuth } from '@/lib/auth';
 import { useStickyState } from '@/lib/sticky-state';
 import { ResizableColGroup, ResizableHeaderCells, defaultWidths, useResizableColumns, type ResizableColumnDef } from '@/components/resizable-columns';
+import { ReverseEntryAction } from '@/components/reverse-entry-action';
 import { format, startOfYear } from 'date-fns';
 
 // Streamlined transaction columns — the entity lives in the account title
@@ -30,6 +31,9 @@ const GL_COLUMNS: ResizableColumnDef[] = [
   { key: 'debit', label: 'Debit', width: 100, align: 'right' },
   { key: 'credit', label: 'Credit', width: 100, align: 'right' },
   { key: 'balance', label: 'Balance', width: 110, align: 'right' },
+  // Reversing a posted entry. Not resizable — it holds one icon button, and
+  // a draggable edge on a 64px action column is only ever a mis-grab.
+  { key: 'actions', label: '', width: 64, resizable: false },
 ];
 const GL_DEFAULT_WIDTHS = defaultWidths(GL_COLUMNS);
 
@@ -91,7 +95,7 @@ export default function GeneralLedger() {
     () => new Map(((entities || []) as any[]).map((e) => [e.id, e])),
     [entities],
   );
-  const columns = useResizableColumns('finsys.gl.columns.v2', GL_DEFAULT_WIDTHS);
+  const columns = useResizableColumns('finsys.gl.columns.v3', GL_DEFAULT_WIDTHS);
   const accountOptions = ((allAccounts || []) as any[]).slice().sort((a, b) => String(a.code).localeCompare(String(b.code)));
 
   return (
@@ -210,6 +214,19 @@ export default function GeneralLedger() {
                       <TableCell className="text-right font-mono text-[13px] tabular-nums whitespace-nowrap">{money(l.credit)}</TableCell>
                       <TableCell className={`text-right font-mono text-[13px] tabular-nums whitespace-nowrap ${naturalBalance(acct.type, l.runningBalance) < 0 ? 'text-rose-700' : 'text-gray-700'}`}>
                         {signed(naturalBalance(acct.type, l.runningBalance))}
+                      </TableCell>
+                      {/* One entry shows on as many rows as it has lines in
+                          this report, so the button is per ENTRY, not per
+                          line — reversing from any of its rows is the same
+                          operation on the same entry. */}
+                      <TableCell className="px-1">
+                        <ReverseEntryAction
+                          journalEntryId={l.journalEntryId}
+                          entryNumber={l.entryNumber}
+                          description={l.description}
+                          transactionType={TRANSACTION_TYPE_LABELS[l.transactionType] ?? l.transactionType}
+                          compact
+                        />
                       </TableCell>
                     </TableRow>
                   ))}
