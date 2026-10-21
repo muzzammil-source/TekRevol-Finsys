@@ -4824,3 +4824,66 @@ action offered. The test entries and the temporary dev login were removed
 afterwards; the dev trial balance is back to its pre-test figure.
 
 `pnpm run typecheck` clean, 25/25 tests pass, `pnpm run build` clean.
+
+---
+
+## 2026-10-21 (later still) — JV row actions grouped into a menu, plus Edit
+
+Builds on the entry above; the GL and Chart of Accounts remain untouched.
+
+**Built**
+- The JV table's standalone button became a single **Actions menu** (⋯) per
+  row, offering what the entry's state allows:
+  - **Draft** → *Edit draft* · *Delete draft*
+  - **Posted** → *Edit (reverse & re-enter)* · *Reverse*
+  - already a reversal, or already reversed → no menu at all, just `—`
+- **Edit on a Posted entry cannot mean editing it** — its lines are
+  immutable and it is the book of record. It runs the two steps a
+  bookkeeper does by hand, **in this order**: post the mirror first, then
+  pre-fill the form from the original's lines. Reversing first means a
+  refused reversal leaves nothing half-done. The result is a three-entry
+  trail (original, reversal, correction), which is what the books should
+  show.
+- **Edit on a Draft** loads it back into the form and posts a replacement;
+  the draft is deleted **after** the replacement posts, never before — if
+  the post is refused the draft is still there to come back to, and a failed
+  delete only leaves a stray draft that is in nobody's books (the opposite
+  order could lose the entry outright). That failure is surfaced, not
+  swallowed. The header switches to "Editing draft <n>" with a Cancel edit
+  button while this is in progress.
+- `GET /api/journal-entries/:id` (new) returns one entry with its lines —
+  the list endpoint gives headers only and the GL report is grouped by
+  account, so neither could rebuild a sheet. Capability `read`,
+  entity-checked, rule registered. Read through `fetchJournalEntry`, a plain
+  function rather than a hook: it answers a click, not a render.
+- Pre-fill carries each line's account, entity, native amount, currency and
+  **stamped rate** (marked touched, so the month's configured rate is not
+  filled in over it — a correction posts at the rate the original used).
+  Contact tags are deliberately **not** carried: this form has no contact
+  field, and re-posting a contact the user can't see on screen would move a
+  sub-ledger balance they didn't choose.
+
+**Verified** on an isolated copy of the dev ledger — 17 checks, all passing:
+- posted edit (500 booked, 430 correct): after reverse + re-enter the
+  expense is baseline **+430** and cash baseline **−430** — the net of
+  500 − 500 + 430 — the trial balance is equal, and all three entries are
+  still Posted;
+- draft edit (250 → 275): the ledger moves by 275 **once**, no draft is left
+  behind, nothing unbalanced;
+- a refused post during a draft edit leaves the draft intact (the ordering
+  above, proven rather than assumed);
+- the ledger returns to its exact baseline once the test rows are removed.
+
+Driven end-to-end in the browser too: the menu shows the right items per
+status, the confirmation explains the two steps, the reversal posts, the
+form fills with the original's lines, and posting the correction leaves
+original `Reversed` / reversal `Reversal` / correction `Posted`. The three
+test entries netted exactly the correction (120 Dr / 120 Cr) before being
+removed; the temporary dev login was removed too.
+
+`pnpm run typecheck` clean, 25/25 tests pass, `pnpm run build` clean.
+
+**Still true:** nothing in the UI creates a Draft JV — the form posts
+immediately — so the Draft branches of this menu are reachable only for
+drafts created another way. They are built and tested, not dead, but today
+they have no producer.

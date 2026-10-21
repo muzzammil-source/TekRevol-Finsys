@@ -680,6 +680,39 @@ export function useBulkUnpostBankTransactions() {
  * refused server-side with the screen that owns them, because each of those
  * has something alongside the entry that must move with it.
  */
+/**
+ * One journal entry with its lines — read on demand when the JV screen
+ * pre-fills a correction. Not a hook: it is fetched in response to a click,
+ * not rendered from, so a query would only add a cache entry nothing reads.
+ */
+export function fetchJournalEntry(id: number): Promise<JournalEntryDetail> {
+  return apiFetch(`/journal-entries/${id}`) as Promise<JournalEntryDetail>;
+}
+
+export type JournalEntryDetail = {
+  id: number;
+  entryNumber: string;
+  entityId: number;
+  brandId: number | null;
+  transactionDate: string;
+  description: string;
+  reference: string;
+  status: string;
+  source: string;
+  lines: {
+    id: number;
+    accountId: number;
+    code: string;
+    accountName: string;
+    accountEntityId: number | null;
+    debit: number;
+    credit: number;
+    currency: string;
+    exchangeRate: number;
+    memo: string;
+  }[];
+};
+
 export function useReverseJournalEntry() {
   return useMutation({
     mutationFn: ({ id, reversalDate, memo }: { id: number; reversalDate?: string; memo?: string }) =>

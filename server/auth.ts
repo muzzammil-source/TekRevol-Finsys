@@ -180,6 +180,9 @@ const RULES: Rule[] = [
   R(ANY, /^\/api\/entities(\/\d+)?$/, "admin", "allEntitiesOnly"),
   R("GET", /^\/api\/brands$/, "read"),
   R("GET", /^\/api\/journal-entries$/, "read"),
+  // One entry with its lines, for pre-filling a correction on the JV
+  // screen. Entity access is checked inside against the entry.
+  R("GET", /^\/api\/journal-entries\/\d+$/, "read"),
   // Manual journal entries hit the ledger directly — same capability as
   // posting a bank transaction; entity access is checked per line inside.
   R("POST", /^\/api\/journal-entries$/, "post"),

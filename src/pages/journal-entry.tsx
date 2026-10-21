@@ -1,13 +1,16 @@
 import React, { useMemo, useState } from 'react';
 import { format } from 'date-fns';
 import { useQueryClient } from '@tanstack/react-query';
-import { fetchExchangeRate, useCreateJournalEntry, useDeleteJournalEntry, useListAccounts, useListEntities, useListJournalEntries, useReverseJournalEntry } from '@workspace/api-client-react';
+import { fetchExchangeRate, fetchJournalEntry, useCreateJournalEntry, useDeleteJournalEntry, useListAccounts, useListEntities, useListJournalEntries, useReverseJournalEntry } from '@workspace/api-client-react';
 import { PageContent, PageHeader, SurfaceCard } from '@/components/layout';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import {
   AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent,
   AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
+import {
+  DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
@@ -19,7 +22,7 @@ import { GLAccountSelect } from '@/components/gl-account-select';
 import { QuickAccountDialog } from '@/components/quick-account-dialog';
 import { ResizableColGroup, ResizableHeaderCells, defaultWidths, useResizableColumns, type ResizableColumnDef } from '@/components/resizable-columns';
 import { invalidateLedgerDerivedQueries } from '@/lib/ledger-queries';
-import { PlusCircle, Trash2, Undo2 } from 'lucide-react';
+import { MoreHorizontal, Pencil, PlusCircle, Trash2, Undo2 } from 'lucide-react';
 
 // Manual Journal Entry (2026-09-17). The one screen where a line hits the
 // ledger without a bank transaction behind it — corrections, accruals,
@@ -95,28 +98,38 @@ const native = (cents: number, currency: string) => {
   }
 };
 
-// Reverse (Posted) or Delete (Draft) for ONE manual journal entry
-// (2026-10-21). Lives only on this screen: a JV is entered here, so it is
+// Row actions for ONE manual journal entry (2026-10-21), grouped into a
+// single menu. Lives only on this screen: a JV is entered here, so it is
 // corrected here. Bank-feed postings are undone on the banking screen and
 // bills/invoices are voided from their own, because each of those has a
 // record alongside the entry that has to move with it — the server refuses
 // them too, this is not just a UI choice.
 //
-// Reversing is not deleting. A posted entry is the book of record, so the
-// correction is a mirror entry posted beside it: both halves stay visible
-// and the net effect on every balance is zero.
-function JournalEntryAction({
+// What the menu offers depends on whether the entry is in the books:
+//   Draft  → Edit (load it back into the form) · Delete (it was never posted)
+//   Posted → Edit (reverse it, then re-enter the corrected version) · Reverse
+//
+// "Edit" on a Posted entry cannot mean editing it: a posted entry is the
+// book of record and its lines are immutable. It means the two-step a
+// bookkeeper would do by hand — post the mirror, then post the corrected
+// entry — so the books show what was entered, that it was cancelled, and
+// what replaced it.
+function JournalEntryActions({
   entry,
   isReversal,
   reversedByEntryNumber,
+  onEditDraft,
+  onEditPosted,
   onDone,
 }: {
   entry: any;
   isReversal: boolean;
   reversedByEntryNumber?: string;
+  onEditDraft: (entry: any) => void;
+  onEditPosted: (entry: any) => void;
   onDone: () => void;
 }) {
-  const [open, setOpen] = useState(false);
+  const [confirming, setConfirming] = useState<null | 'reverse' | 'delete' | 'edit-posted'>(null);
   const { toast } = useToast();
   const { can } = useAuth();
   const reverse = useReverseJournalEntry();
@@ -124,45 +137,108 @@ function JournalEntryAction({
 
   const isDraft = entry.status !== 'Posted';
   const busy = reverse.isPending || remove.isPending;
-  // Posting is what a reversal does, so the same capability gates both.
-  // Without it the column is simply empty rather than offering a 403.
+  // Posting is what a reversal does, so the same capability gates all of
+  // this. Without it the column is simply empty rather than offering a 403.
   if (!can('post')) return null;
   // Already-corrected entries have nothing left to do: reversing a reversal
   // only re-posts the original, and reversing twice is refused server-side.
   if (!isDraft && (isReversal || reversedByEntryNumber)) {
     return (
-      <span className="text-[11px] text-muted-foreground" title={reversedByEntryNumber ? `Reversed by ${reversedByEntryNumber}` : 'This entry is a reversal'}>
+      <span
+        className="text-[11px] text-muted-foreground"
+        title={reversedByEntryNumber ? `Reversed by ${reversedByEntryNumber}` : 'This entry is a reversal'}
+        data-jv-no-actions={entry.entryNumber}
+      >
         —
       </span>
     );
   }
 
+  const failed = (title: string) => (err: any) =>
+    toast({ title, description: err.message, variant: 'destructive' });
+
+  const runReverse = (then?: (res: any) => void) =>
+    reverse.mutate(
+      { id: entry.id },
+      {
+        onSuccess: (res) => {
+          setConfirming(null);
+          onDone();
+          if (then) then(res);
+          else
+            toast({
+              title: `Reversed ${entry.entryNumber}`,
+              description: `Posted ${res.reversalEntryNumber} as its mirror. Both entries stay in the books.`,
+            });
+        },
+        onError: failed(`Could not reverse ${entry.entryNumber}`),
+      },
+    );
+
   return (
     <>
-      <Button
-        variant="ghost"
-        size="sm"
-        className="h-7 px-2 text-xs text-muted-foreground hover:text-rose-700"
-        onClick={() => setOpen(true)}
-        disabled={busy}
-        data-jv-action={isDraft ? 'delete' : 'reverse'}
-        data-jv-entry={entry.entryNumber}
-      >
-        {isDraft ? <Trash2 className="mr-1 h-3.5 w-3.5" /> : <Undo2 className="mr-1 h-3.5 w-3.5" />}
-        {isDraft ? 'Delete' : 'Reverse'}
-      </Button>
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-7 w-7 p-0 text-muted-foreground"
+            disabled={busy}
+            aria-label={`Actions for ${entry.entryNumber}`}
+            data-jv-actions={entry.entryNumber}
+          >
+            <MoreHorizontal className="h-4 w-4" />
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end" className="w-56">
+          {isDraft ? (
+            <>
+              <DropdownMenuItem onSelect={() => onEditDraft(entry)} data-jv-menu="edit-draft">
+                <Pencil className="mr-2 h-3.5 w-3.5" /> Edit draft
+              </DropdownMenuItem>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem
+                onSelect={(ev) => { ev.preventDefault(); setConfirming('delete'); }}
+                className="text-rose-700 focus:text-rose-700"
+                data-jv-menu="delete"
+              >
+                <Trash2 className="mr-2 h-3.5 w-3.5" /> Delete draft
+              </DropdownMenuItem>
+            </>
+          ) : (
+            <>
+              <DropdownMenuItem
+                onSelect={(ev) => { ev.preventDefault(); setConfirming('edit-posted'); }}
+                data-jv-menu="edit-posted"
+              >
+                <Pencil className="mr-2 h-3.5 w-3.5" /> Edit (reverse &amp; re-enter)
+              </DropdownMenuItem>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem
+                onSelect={(ev) => { ev.preventDefault(); setConfirming('reverse'); }}
+                data-jv-menu="reverse"
+              >
+                <Undo2 className="mr-2 h-3.5 w-3.5" /> Reverse
+              </DropdownMenuItem>
+            </>
+          )}
+        </DropdownMenuContent>
+      </DropdownMenu>
 
-      <AlertDialog open={open} onOpenChange={setOpen}>
+      <AlertDialog open={confirming !== null} onOpenChange={(o) => { if (!o) setConfirming(null); }}>
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>
-              {isDraft ? `Delete draft ${entry.entryNumber}?` : `Reverse ${entry.entryNumber}?`}
+              {confirming === 'delete' && `Delete draft ${entry.entryNumber}?`}
+              {confirming === 'reverse' && `Reverse ${entry.entryNumber}?`}
+              {confirming === 'edit-posted' && `Edit ${entry.entryNumber} by reversing it?`}
             </AlertDialogTitle>
             <AlertDialogDescription asChild>
               <div className="space-y-2 text-sm">
-                {isDraft ? (
+                {confirming === 'delete' && (
                   <p>This draft was never posted, so nothing in the books changes. It is removed along with its lines.</p>
-                ) : (
+                )}
+                {confirming === 'reverse' && (
                   <>
                     <p>
                       This posts a <strong>mirror entry</strong> dated today, with every debit and credit
@@ -171,6 +247,22 @@ function JournalEntryAction({
                     </p>
                     <p className="text-muted-foreground">
                       Net effect on every balance, report and statement is zero. Nothing is deleted.
+                    </p>
+                  </>
+                )}
+                {confirming === 'edit-posted' && (
+                  <>
+                    <p>
+                      A posted entry can't be edited in place — it is the book of record. This does the two
+                      steps a correction actually takes:
+                    </p>
+                    <ol className="ml-4 list-decimal space-y-1 text-muted-foreground">
+                      <li>posts a mirror entry now, cancelling {entry.entryNumber};</li>
+                      <li>loads its lines into the form above so you can adjust them and post the corrected entry.</li>
+                    </ol>
+                    <p className="text-muted-foreground">
+                      The reversal posts immediately. Nothing replaces it until you post the form, so the books
+                      are left net-zero for this entry in the meantime.
                     </p>
                   </>
                 )}
@@ -188,28 +280,40 @@ function JournalEntryAction({
                 // Held open until the server answers, so a refusal is read
                 // in place instead of the dialog vanishing on a failure.
                 ev.preventDefault();
-                const done = (title: string, description: string) => {
-                  setOpen(false);
-                  onDone();
-                  toast({ title, description });
-                };
-                const failed = (title: string) => (err: any) =>
-                  toast({ title, description: err.message, variant: 'destructive' });
-
-                if (isDraft) {
-                  remove.mutate({ id: entry.id }, {
-                    onSuccess: () => done(`Deleted ${entry.entryNumber}`, 'The draft and its lines are gone. Nothing was posted, so no balance moved.'),
-                    onError: failed(`Could not delete ${entry.entryNumber}`),
-                  });
+                if (confirming === 'delete') {
+                  remove.mutate(
+                    { id: entry.id },
+                    {
+                      onSuccess: () => {
+                        setConfirming(null);
+                        onDone();
+                        toast({ title: `Deleted ${entry.entryNumber}`, description: 'The draft and its lines are gone. Nothing was posted, so no balance moved.' });
+                      },
+                      onError: failed(`Could not delete ${entry.entryNumber}`),
+                    },
+                  );
+                } else if (confirming === 'reverse') {
+                  runReverse();
                 } else {
-                  reverse.mutate({ id: entry.id }, {
-                    onSuccess: (res) => done(`Reversed ${entry.entryNumber}`, `Posted ${res.reversalEntryNumber} as its mirror. Both entries stay in the books.`),
-                    onError: failed(`Could not reverse ${entry.entryNumber}`),
+                  // Reverse first: if it is refused, nothing has been loaded
+                  // into the form and the books are untouched.
+                  runReverse((res) => {
+                    onEditPosted(entry);
+                    toast({
+                      title: `Reversed ${entry.entryNumber} — now edit and post`,
+                      description: `${res.reversalEntryNumber} cancels it. Its lines are in the form above; adjust them and post the corrected entry.`,
+                    });
                   });
                 }
               }}
             >
-              {busy ? (isDraft ? 'Deleting…' : 'Reversing…') : isDraft ? 'Delete draft' : 'Post reversal'}
+              {busy
+                ? 'Working…'
+                : confirming === 'delete'
+                  ? 'Delete draft'
+                  : confirming === 'reverse'
+                    ? 'Post reversal'
+                    : 'Reverse and edit'}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
@@ -225,6 +329,8 @@ export default function JournalEntryPage() {
   const canPost = can('post');
   const canWriteCoa = can('coa.write');
   const createEntry = useCreateJournalEntry();
+  // Retires the draft a form edit replaces (see the post handler).
+  const deleteEntry = useDeleteJournalEntry();
 
   const { data: entitiesData } = useListEntities();
   const entities = useMemo(() => (entitiesData || []) as any[], [entitiesData]);
@@ -247,6 +353,12 @@ export default function JournalEntryPage() {
     }
     return map;
   }, [manualEntries]);
+
+  // The draft this form is editing, if any. Set only by "Edit draft": the
+  // posted-entry correction loads the same lines but posts a NEW entry, so
+  // it deliberately leaves this null.
+  const [editingDraft, setEditingDraft] = useState<{ id: number; entryNumber: string } | null>(null);
+  const formRef = React.useRef<HTMLDivElement | null>(null);
 
   const defaultEntityId = entities[0] ? String(entities[0].id) : '';
   const [transactionDate, setTransactionDate] = useState(format(new Date(), 'yyyy-MM-dd'));
@@ -361,6 +473,62 @@ export default function JournalEntryPage() {
   const incomplete = lines.some((l) => !l.accountId || !l.entityId || (toCents(l.debit) === 0 && toCents(l.credit) === 0));
   const canSubmit = canPost && balanced && entityImbalance.length === 0 && !incomplete && !createEntry.isPending;
 
+  /**
+   * Pulls one entry's lines back into the form.
+   *
+   * `asDraftEdit` decides what posting the form then means: editing a draft
+   * replaces it (the draft is deleted once the new entry posts), while a
+   * posted entry has already been reversed by the time this runs, so the
+   * form is simply a fresh entry that happens to start from its lines.
+   *
+   * The entry's own contact tags are NOT carried across — this form has no
+   * contact field, and silently re-posting a contact the user can't see on
+   * screen would put a sub-ledger balance somewhere they didn't choose.
+   */
+  const loadIntoForm = async (entry: any, { asDraftEdit }: { asDraftEdit: boolean }) => {
+    try {
+      const full = await fetchJournalEntry(entry.id);
+      setTransactionDate(asDraftEdit ? full.transactionDate : format(new Date(), 'yyyy-MM-dd'));
+      setReference(String(full.reference || '').replace(/\[REVERSAL-OF-\d+\]\s*/, '').trim());
+      setDescription(asDraftEdit ? full.description : `Correction of ${full.entryNumber} — ${full.description || 'journal entry'}`);
+      setLines(
+        full.lines.map((l) =>
+          newLine({
+            accountId: String(l.accountId),
+            // A Shared account carries no entity of its own, so the line
+            // keeps the entry's.
+            entityId: String(l.accountEntityId ?? full.entityId),
+            description: String(l.memo || ''),
+            debit: l.debit ? String(l.debit) : '',
+            credit: l.credit ? String(l.credit) : '',
+            currency: l.currency || 'USD',
+            // Stamped rate, marked as touched so the month's configured rate
+            // is not filled in over it — a correction posts at the rate the
+            // original used.
+            rate: l.currency && l.currency !== 'USD' ? String(l.exchangeRate ?? '') : '',
+            rateTouched: Boolean(l.currency && l.currency !== 'USD'),
+          }),
+        ),
+      );
+      setEditingDraft(asDraftEdit ? { id: full.id, entryNumber: full.entryNumber } : null);
+      formRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      if (asDraftEdit) {
+        toast({ title: `Editing draft ${full.entryNumber}`, description: 'Posting replaces the draft. Use Cancel to leave it untouched.' });
+      }
+    } catch (err: any) {
+      toast({ title: 'Could not load that entry', description: err.message, variant: 'destructive' });
+    }
+  };
+
+  /** Leaves an in-progress draft edit without touching the draft. */
+  const cancelDraftEdit = () => {
+    setEditingDraft(null);
+    setLines([newLine({ entityId: defaultEntityId }), newLine({ entityId: defaultEntityId })]);
+    setReference('');
+    setDescription('');
+    setTransactionDate(format(new Date(), 'yyyy-MM-dd'));
+  };
+
   const post = () => {
     if (!canSubmit) return;
     createEntry.mutate(
@@ -386,6 +554,27 @@ export default function JournalEntryPage() {
             title: `Posted ${res.entryNumbers.join(', ')}`,
             description: res.entryNumbers.length > 1 ? 'One balanced entry per entity.' : undefined,
           });
+          // The draft this form was editing is replaced by what just
+          // posted, so it is removed now. Deliberately AFTER the post
+          // succeeds: if the post is refused, the draft is still there to
+          // come back to. A delete that fails leaves a stray draft, which
+          // is visible on this screen and in nobody's books — the opposite
+          // order could lose the entry entirely.
+          if (editingDraft) {
+            const draft = editingDraft;
+            setEditingDraft(null);
+            deleteEntry.mutate(
+              { id: draft.id },
+              {
+                onError: (err: any) =>
+                  toast({
+                    title: `Posted, but draft ${draft.entryNumber} is still listed`,
+                    description: `${err.message} It was never posted, so no balance is affected — delete it from the table when you can.`,
+                    variant: 'destructive',
+                  }),
+              },
+            );
+          }
           // Ledger-derived views (COA balances, GL, reports) refresh now.
           invalidateLedgerDerivedQueries(queryClient);
           setLines([newLine({ entityId: defaultEntityId }), newLine({ entityId: defaultEntityId })]);
@@ -399,13 +588,22 @@ export default function JournalEntryPage() {
 
   return (
     <>
-      <PageHeader title="New Journal Entry" description="Post a balanced entry straight to the General Ledger">
+      <PageHeader
+        title={editingDraft ? `Editing draft ${editingDraft.entryNumber}` : 'New Journal Entry'}
+        description={editingDraft ? 'Posting replaces the draft with what you enter here' : 'Post a balanced entry straight to the General Ledger'}
+      >
+        {editingDraft && (
+          <Button variant="outline" onClick={cancelDraftEdit} disabled={createEntry.isPending} data-cancel-draft-edit>
+            Cancel edit
+          </Button>
+        )}
         <Button onClick={post} disabled={!canSubmit} data-post-journal-entry>
-          {createEntry.isPending ? 'Posting…' : 'Post Journal Entry'}
+          {createEntry.isPending ? 'Posting…' : editingDraft ? 'Post & replace draft' : 'Post Journal Entry'}
         </Button>
       </PageHeader>
 
       <PageContent>
+        <div ref={formRef} />
         {!canPost && (
           <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800" data-readonly-banner>
             Read-only access — a Manager or Admin posts journal entries.
@@ -656,10 +854,12 @@ export default function JournalEntryPage() {
                           )}
                         </TableCell>
                         <TableCell className="text-right">
-                          <JournalEntryAction
+                          <JournalEntryActions
                             entry={e}
                             isReversal={isReversal}
                             reversedByEntryNumber={reversedBy?.entryNumber}
+                            onEditDraft={(entry) => loadIntoForm(entry, { asDraftEdit: true })}
+                            onEditPosted={(entry) => loadIntoForm(entry, { asDraftEdit: false })}
                             onDone={() => invalidateLedgerDerivedQueries(queryClient)}
                           />
                         </TableCell>

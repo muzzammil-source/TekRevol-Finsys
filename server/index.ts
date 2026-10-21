@@ -2188,6 +2188,28 @@ app.post("/api/journal-entries", (req, res) => {
   }
 });
 
+// One entry with its lines — what the JV screen reads to pre-fill the form
+// when correcting an entry (2026-10-21). The list endpoint returns headers
+// only, and the GL report is grouped by account, so neither can rebuild a
+// sheet. Lines come back with the account's code/name and the line's own
+// currency and stamped rate, because that is what the form edits.
+app.get("/api/journal-entries/:id", (req, res) => {
+  const id = Number(req.params.id);
+  const entry = db.prepare("SELECT * FROM journal_entries WHERE id = ?").get(id) as any;
+  if (!entry) return res.status(404).json({ error: `Journal entry ${id} not found` });
+  if (!canAccessEntity(req, entry.entityId)) {
+    return res.status(403).json({ error: "You don't have access to this entry's entity" });
+  }
+  entry.lines = db
+    .prepare(
+      `SELECT jl.*, a.code, a.name as accountName, a.entityId as accountEntityId
+       FROM journal_lines jl JOIN accounts a ON a.id = jl.accountId
+       WHERE jl.journalEntryId = ? ORDER BY jl.id`,
+    )
+    .all(id);
+  res.json(entry);
+});
+
 // Reversing and deleting MANUAL journal entries (2026-10-21).
 //
 // Scope: `source = 'ManualJournal'` only — the entries the Journal Entry

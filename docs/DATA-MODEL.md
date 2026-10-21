@@ -60,6 +60,8 @@ A Posted entry is never edited or deleted — `trg_journal_lines_immutable_when_
 
 The link between the two is a tag in the reversal's `reference`: **`[REVERSAL-OF-<original entry id>]`**, the same convention as the `[SPLIT-BT<id>-<ts>]` tag that ties the entries of one cross-entity bank posting together. It is what makes "already reversed" and "is itself a reversal" detectable without a schema change — there is no `reversedByEntryId` column. The reversal is itself `source = 'ManualJournal'`, so it lists beside the original on the JV screen.
 
+Correcting the *amount* of a posted JV therefore leaves **three** entries, which is what the books should show: the original, its reversal, and the corrected entry posted afterwards. The JV screen's "Edit (reverse & re-enter)" does exactly those two steps in order — reverse first, then pre-fill the form from the original's lines — so a refused reversal leaves nothing half-done.
+
 **Scope: `source = 'ManualJournal'` only.** Every other source is corrected where it was entered, because each has a record alongside the entry that has to move with it — `BankFeed` through the banking screen's Undo (which also returns the `bank_transactions` row to `PENDING`), `AR`/`AP` by voiding the invoice or bill (which also moves the document's status). `Import` and `OpeningBalance` are not hand-entered and are not corrected one entry at a time. A **Draft** JV is deleted outright instead; it was never in the books.
 
 ### `split_rules` / `split_rule_lines` — reusable multi-entity split templates (2026-09-17)
