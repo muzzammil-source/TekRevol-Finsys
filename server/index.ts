@@ -3950,21 +3950,27 @@ app.post("/api/bank-transactions/:id/post", (req, res) => {
 // Sequencing matters: journal_lines are immutable while their entry is
 // Posted (Phase 1.1 triggers), so the entry must be flipped back to Draft
 // before its lines can be deleted.
-app.post("/api/bank-transactions/:id/unpost", (req, res) => {
-  const id = Number(req.params.id);
+/**
+ * Undoes ONE posted bank transaction: deletes the journal entries it
+ * created and returns the row to the pending feed.
+ *
+ * Shared by the single-row and bulk routes (2026-10-21) so the two can
+ * never drift — a bulk path with its own copy of these checks is exactly
+ * how a guard gets missed. Throws PostingError; performs no transaction of
+ * its own, so the caller decides the atomicity boundary.
+ */
+function unpostBankTransactionRow(req: express.Request, id: number): { entryId: number; entryIds: number[] } {
   const txn = db.prepare("SELECT * FROM bank_transactions WHERE id = ?").get(id) as any;
-  if (!txn) return res.status(404).json({ error: "Bank transaction not found" });
+  if (!txn) throw new PostingError(404, `Bank transaction ${id} not found`);
   if (txn.status !== "POSTED" || !txn.journalEntryId) {
-    return res.status(400).json({ error: "This transaction isn't posted, so there's nothing to undo." });
+    throw new PostingError(400, `Transaction ${id} isn't posted, so there's nothing to undo.`);
   }
 
   // Refuse if the entry has been reconciled — undoing it would silently
   // change a period someone has already signed off.
   const matched = (db.prepare("SELECT COUNT(*) as n FROM reconciliation_matches WHERE bankTransactionId = ?").get(id) as any).n;
   if (matched > 0) {
-    return res.status(400).json({
-      error: "This transaction is part of a completed reconciliation. Undo the reconciliation first.",
-    });
+    throw new PostingError(400, `Transaction ${id} is part of a completed reconciliation. Undo the reconciliation first.`);
   }
 
   const entryId = txn.journalEntryId;
@@ -3983,37 +3989,78 @@ app.post("/api/bank-transactions/:id/unpost", (req, res) => {
     : [entryId];
 
   // Undoing removes entries from EVERY entity in the batch, so the user
-  // needs access to all of them.
-  try {
-    assertBankTransactionAccess(req, id);
-    for (const eid of entryIds) {
-      const e = db.prepare("SELECT entityId FROM journal_entries WHERE id = ?").get(eid) as any;
-      assertEntityAccess(req, e?.entityId, "an entity this posting was charged to");
-    }
-  } catch (err: any) {
-    return res.status(hasHttpStatus(err) ? err.status : 403).json({ error: err.message });
+  // needs access to all of them — and none of those periods may be closed,
+  // since deleting a posted entry out of a locked month is precisely what
+  // locking exists to prevent.
+  assertBankTransactionAccess(req, id);
+  for (const eid of entryIds) {
+    const e = db.prepare("SELECT entityId, transactionDate FROM journal_entries WHERE id = ?").get(eid) as any;
+    assertEntityAccess(req, e?.entityId, "an entity this posting was charged to");
+    if (e) assertPeriodNotLocked(e.entityId, e.transactionDate);
   }
 
-  try {
-    db.transaction(() => {
-      for (const eid of entryIds) {
-        db.prepare("UPDATE journal_entries SET status = 'Draft' WHERE id = ?").run(eid);
-        db.prepare("DELETE FROM journal_line_allocations WHERE journalLineId IN (SELECT id FROM journal_lines WHERE journalEntryId = ?)").run(eid);
-        db.prepare("DELETE FROM journal_lines WHERE journalEntryId = ?").run(eid);
-        db.prepare("DELETE FROM journal_entries WHERE id = ?").run(eid);
-      }
-      db.prepare("UPDATE bank_transactions SET status = 'PENDING', journalEntryId = NULL WHERE id = ?").run(id);
-    })();
-  } catch (err: any) {
-    return res.status(400).json({ error: err.message || "Failed to unpost transaction" });
+  for (const eid of entryIds) {
+    // Posted lines are immutable by trigger, so the entry goes back to
+    // Draft before anything is removed.
+    db.prepare("UPDATE journal_entries SET status = 'Draft' WHERE id = ?").run(eid);
+    db.prepare("DELETE FROM journal_line_allocations WHERE journalLineId IN (SELECT id FROM journal_lines WHERE journalEntryId = ?)").run(eid);
+    db.prepare("DELETE FROM journal_lines WHERE journalEntryId = ?").run(eid);
+    db.prepare("DELETE FROM journal_entries WHERE id = ?").run(eid);
   }
+  db.prepare("UPDATE bank_transactions SET status = 'PENDING', journalEntryId = NULL WHERE id = ?").run(id);
 
-  res.json({
-    ok: true,
-    removedJournalEntryId: entryId,
-    removedJournalEntryIds: entryIds,
-    bankTransaction: db.prepare("SELECT * FROM bank_transactions WHERE id = ?").get(id),
-  });
+  return { entryId, entryIds };
+}
+
+app.post("/api/bank-transactions/:id/unpost", (req, res) => {
+  const id = Number(req.params.id);
+  try {
+    const { entryId, entryIds } = db.transaction(() => unpostBankTransactionRow(req, id))();
+    res.json({
+      ok: true,
+      removedJournalEntryId: entryId,
+      removedJournalEntryIds: entryIds,
+      bankTransaction: db.prepare("SELECT * FROM bank_transactions WHERE id = ?").get(id),
+    });
+  } catch (err: any) {
+    res.status(hasHttpStatus(err) ? err.status : 400).json({ error: err.message || "Failed to unpost transaction" });
+  }
+});
+
+// Undo several postings at once (2026-10-21).
+//
+// All or nothing, in one database transaction. A partial batch would be
+// worse than a refusal here: half-undone work across intercompany entries
+// leaves the group's books unbalanced, and the user has no way to see
+// which half landed. If any row is refused — not posted, reconciled, in a
+// locked period, another entity's — nothing at all is written and the
+// error names the row responsible.
+app.post("/api/bank-transactions/bulk-unpost", (req, res) => {
+  const ids: number[] = Array.isArray(req.body?.ids)
+    ? [...new Set<number>(req.body.ids.map(Number).filter((n: number) => Number.isFinite(n)))]
+    : [];
+  if (ids.length === 0) return res.status(400).json({ error: "ids is required" });
+
+  try {
+    const undone = db.transaction(() =>
+      ids.map((id) => {
+        const { entryIds } = unpostBankTransactionRow(req, id);
+        return { bankTransactionId: id, removedJournalEntryIds: entryIds };
+      }),
+    )();
+
+    res.json({
+      unposted: undone.length,
+      items: undone,
+      removedJournalEntryCount: undone.reduce((n, u) => n + u.removedJournalEntryIds.length, 0),
+    });
+  } catch (err: any) {
+    res.status(hasHttpStatus(err) ? err.status : 400).json({
+      error: err?.message || "Could not undo these postings",
+      // Nothing was written: the whole batch rolled back.
+      unposted: 0,
+    });
+  }
 });
 
 app.post("/api/bank-transactions/:id/post-split", (req, res) => {

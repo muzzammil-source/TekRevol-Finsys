@@ -18,6 +18,7 @@ import {
   type ContactType,
   useBulkPostBankTransactions,
   useBulkIgnoreBankTransactions,
+  useBulkUnpostBankTransactions,
   useImportBankStatement,
   useRefreshBankAccountBalance,
   useSyncPlaidBankAccount,
@@ -2009,8 +2010,10 @@ const PENDING_DEFAULT_WIDTHS = defaultWidths(PENDING_COLUMNS);
 // the same place on both — read-only here, since the values are whatever the
 // journal entry recorded at posting time.
 const POSTED_COLUMNS: ResizableColumnDef[] = [
+  // Same leading select column as Pending, so the two tables stay aligned.
+  { key: 'select', label: '', width: 36, resizable: false },
   { key: 'date', label: 'Date', width: 88, sortKey: 'date' },
-  { key: 'description', label: 'Description', width: 164, sortKey: 'description' },
+  { key: 'description', label: 'Description', width: 136, sortKey: 'description' },
   { key: 'spent', label: 'Spent', width: 92, align: 'right', sortKey: 'spent' },
   { key: 'received', label: 'Received', width: 92, align: 'right', sortKey: 'received' },
   { key: 'contact', label: 'From/To', width: 118 },
@@ -2035,6 +2038,8 @@ function PostedTransactionsTab({ bankAccountById, onLedgerChanged, filterBankAcc
   const canPost = useAuth().can('post');
   const { toast } = useToast();
   const unpost = useUnpostBankTransaction();
+  const bulkUnpost = useBulkUnpostBankTransactions();
+  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
 
   // The selected bank card scopes the posted list.
   const { data: posted, isLoading: postedLoading } = useListBankTransactions(
@@ -2061,7 +2066,9 @@ function PostedTransactionsTab({ bankAccountById, onLedgerChanged, filterBankAcc
     );
   };
 
-  const columns = useResizableColumns('finsys.banking.posted.columns.v5', POSTED_DEFAULT_WIDTHS);
+  // v6: a select column was added, so stored widths from v5 no longer line
+  // up with the column list.
+  const columns = useResizableColumns('finsys.banking.posted.columns.v6', POSTED_DEFAULT_WIDTHS);
 
   const allRows = useMemo(() => (posted || []) as any[], [posted]);
   const fieldsOf = React.useCallback((row: any): FeedRowFields => {
@@ -2093,8 +2100,69 @@ function PostedTransactionsTab({ bankAccountById, onLedgerChanged, filterBankAcc
 
   React.useEffect(() => { onCounts({ shown: rows.length, total: allRows.length }); }, [rows.length, allRows.length, onCounts]);
 
+  // Selection is scoped to the rows actually on screen: a filter or a bank
+  // switch must not leave invisible rows armed for an undo.
+  const visibleIds = useMemo(() => new Set(rows.map((r) => r.id)), [rows]);
+  React.useEffect(() => {
+    setSelectedIds((prev) => {
+      const next = new Set([...prev].filter((id) => visibleIds.has(id)));
+      return next.size === prev.size ? prev : next;
+    });
+  }, [visibleIds]);
+
+  const allSelected = rows.length > 0 && rows.every((r) => selectedIds.has(r.id));
+  const toggleSelectAll = () => setSelectedIds(allSelected ? new Set() : new Set(rows.map((r) => r.id)));
+  const toggleRow = (id: number) => setSelectedIds((prev) => {
+    const next = new Set(prev);
+    next.has(id) ? next.delete(id) : next.add(id);
+    return next;
+  });
+
+  // Undoing is all-or-nothing server-side: a half-undone batch would leave
+  // intercompany entries unbalanced with no way to see which half landed.
+  const handleBulkUnpost = () => {
+    const ids = [...selectedIds];
+    if (ids.length === 0) return;
+    const confirmed = window.confirm(
+      `Undo ${ids.length} posted transaction${ids.length === 1 ? '' : 's'}?\n\n` +
+        'Their journal entries will be deleted and the transactions return to the unposted feed. ' +
+        'If any one of them cannot be undone, none of them are.',
+    );
+    if (!confirmed) return;
+
+    bulkUnpost.mutate(
+      { ids },
+      {
+        onSuccess: (res) => {
+          toast({
+            title: `Undid ${res.unposted} posting${res.unposted === 1 ? '' : 's'}`,
+            description: `${res.removedJournalEntryCount} journal entr${res.removedJournalEntryCount === 1 ? 'y' : 'ies'} removed — the transactions are back in the unposted feed.`,
+          });
+          setSelectedIds(new Set());
+          onLedgerChanged();
+        },
+        onError: (err: any) =>
+          toast({ title: 'Nothing was undone', description: err.message, variant: 'destructive' }),
+      },
+    );
+  };
+
   return (
     <div>
+      {canPost && selectedIds.size > 0 && (
+        <div className="mx-4 mb-3 flex flex-wrap items-center justify-between gap-2 rounded-md border bg-muted/40 px-3 py-2" data-posted-selection-bar>
+          <span className="font-mono text-sm">{selectedIds.size} selected</span>
+          <div className="flex items-center gap-2">
+            <Button size="sm" variant="outline" onClick={() => setSelectedIds(new Set())} disabled={bulkUnpost.isPending}>
+              Clear
+            </Button>
+            <Button size="sm" variant="outline" onClick={handleBulkUnpost} disabled={bulkUnpost.isPending}>
+              <Undo2 className="mr-2 size-4" />
+              {bulkUnpost.isPending ? 'Undoing…' : `Undo Selected (${selectedIds.size})`}
+            </Button>
+          </div>
+        </div>
+      )}
 
       <div className="border-t overflow-x-auto">
         <Table
@@ -2106,7 +2174,9 @@ function PostedTransactionsTab({ bankAccountById, onLedgerChanged, filterBankAcc
           <TableHeader>
             <TableRow className="hover:bg-transparent">
               <ResizableHeaderCells
-                columns={POSTED_COLUMNS}
+                columns={POSTED_COLUMNS.map((c) => c.key === 'select'
+                  ? { ...c, header: canPost ? <Checkbox checked={allSelected} onCheckedChange={toggleSelectAll} aria-label="Select all posted" /> : null }
+                  : c)}
                 table={columns}
                 sort={view.sort}
                 onSortChange={(sort) => setView((prev) => ({ ...prev, sort }))}
@@ -2135,7 +2205,16 @@ function PostedTransactionsTab({ bankAccountById, onLedgerChanged, filterBankAcc
                 const rowContacts = (row.contacts || []) as { id: number; name: string; contactType: string }[];
                 const chargedTo = (row.chargedToEntities || []) as { entityId: number; name: string }[];
                 return (
-                  <TableRow key={row.id}>
+                  <TableRow key={row.id} data-state={selectedIds.has(row.id) ? 'selected' : undefined}>
+                    <TableCell className="align-top">
+                      {canPost && (
+                        <Checkbox
+                          checked={selectedIds.has(row.id)}
+                          onCheckedChange={() => toggleRow(row.id)}
+                          aria-label={`Select ${row.description || 'transaction'}`}
+                        />
+                      )}
+                    </TableCell>
                     <TableCell className="text-xs whitespace-nowrap">{row.transactionDate}</TableCell>
                     {/* Wraps rather than truncating: this is the read-only
                         view, and statement text routinely runs longer than

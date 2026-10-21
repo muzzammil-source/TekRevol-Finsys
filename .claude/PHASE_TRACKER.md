@@ -4659,3 +4659,53 @@ stated there so a future session doesn't assume more was built than was.
   time — neither blocked Phase 1.6, but both are worth resolving before
   Phase 2's "grouped management reporting" potentially builds on top of
   either.
+
+---
+
+## 2026-10-21 — Batch unposting from the Posted feed (UI + API)
+
+Not a numbered phase; a follow-on to the banking-hub work.
+
+**Built**
+- `POST /api/bank-transactions/bulk-unpost` — `{ ids: number[] }`, **all-or-nothing**
+  inside one `db.transaction(...)`. Returns
+  `{ unposted, items: [{ bankTransactionId, removedJournalEntryIds[] }], removedJournalEntryCount }`,
+  or `{ error, unposted: 0 }` with nothing written.
+- Single-row unpost and the batch route now share one helper,
+  `unpostBankTransactionRow(req, id)` in `server/index.ts`. **Behaviour change
+  worth knowing:** the single-row route previously did *not* check period
+  locks; via the shared helper it now does. That is the correct rule (§0 — a
+  locked period must not have entries deleted out of it), but it means a
+  posting inside a locked period can no longer be undone without unlocking.
+- RBAC rule registered in `server/auth.ts` (`post` capability, entity-checked
+  per row — a batch spanning an entity the user can't reach is refused whole).
+- `useBulkUnpostBankTransactions()` hook; multi-select checkboxes and an
+  "Undo Selected (N)" action bar on the Posted tab of the banking hub.
+  Column-layout storage key bumped to `finsys.banking.posted.columns.v6`.
+
+**Note on naming:** the endpoint is `/api/bank-transactions/bulk-unpost`,
+not `/api/transactions/bulk-unpost`, to sit with its siblings
+(`bulk-post`, `bulk-ignore`) under the same resource.
+
+**Verified** on an isolated copy of the dev ledger (throwaway stack on a
+spare port, copy deleted afterwards), six entries / fourteen lines /
+three posted rows in:
+- a selection mixing posted rows with an already-pending one → `400`,
+  `unposted: 0`, journal and feed statuses byte-identical afterwards;
+- the cross-entity split `BT17` → all three `[SPLIT-BT17-…]` sibling entries
+  removed together, none left behind, remaining ledger still balanced
+  (12,604.16 Dr = Cr);
+- unposting everything → `journal_entries` and `journal_lines` both back to
+  0, all 15 feed rows `PENDING`;
+- throughout: zero orphaned `journal_lines`, zero orphaned
+  `journal_line_allocations`, zero feed rows pointing at a deleted entry,
+  zero `POSTED` rows without a `journalEntryId`;
+- `{ids: []}`, `{ids: ["abc"]}` and `{}` all rejected `400`.
+
+`pnpm run typecheck` clean, 25/25 tests pass, `pnpm run build` clean.
+
+**Still open (user-side):** `@workspace/server` on Railway still has
+`watchPatterns: ["/server/**"]`, so frontend-only commits deploy as SKIPPED.
+This commit touches `server/`, so it will deploy — but the pattern should be
+cleared in the Railway dashboard or the next UI-only change will silently
+not ship.

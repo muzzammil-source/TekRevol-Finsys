@@ -655,6 +655,22 @@ export function usePostBankTransactionSplit() {
 }
 
 /**
+ * Undoes several postings at once — all or nothing. If any row is refused
+ * (reconciled, locked period, not yours) nothing is written and the error
+ * names it, so the ledger is never left half-undone.
+ */
+export function useBulkUnpostBankTransactions() {
+  return useMutation({
+    mutationFn: ({ ids }: { ids: number[] }) =>
+      jsonPost('/bank-transactions/bulk-unpost', { ids }) as Promise<{
+        unposted: number;
+        removedJournalEntryCount: number;
+        items: { bankTransactionId: number; removedJournalEntryIds: number[] }[];
+      }>,
+  });
+}
+
+/**
  * Dismisses pending feed rows (status → IGNORED). Rows already posted are
  * refused server-side and come back in `skipped`, so a stale selection can
  * never detach a transaction from its journal entry.

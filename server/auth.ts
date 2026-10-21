@@ -211,6 +211,9 @@ const RULES: Rule[] = [
   R("POST", /^\/api\/bank-transactions\/import$/, "import"),
   R("PUT", /^\/api\/bank-transactions\/\d+\/stage$/, "stage"),
   R("POST", /^\/api\/bank-transactions\/\d+\/(post|unpost|post-split)$/, "post"),
+  // Undoing postings removes journal entries, so it needs the same
+  // authority as making them.
+  R("POST", /^\/api\/bank-transactions\/bulk-unpost$/, "post"),
   R("POST", /^\/api\/bank-transactions\/bulk-post$/, "post"),
   // Dismissing feed rows decides what never reaches the books, so it needs
   // the same authority as posting them.
