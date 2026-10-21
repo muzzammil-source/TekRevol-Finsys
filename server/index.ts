@@ -8643,5 +8643,5 @@ app.listen(PORT, "0.0.0.0", () => {
   // touching only src/ is SKIPPED with "No changes to watched files" and
   // never builds — bumping this line is the manual workaround. Clear the
   // watch paths in the service settings and this stops being necessary.
-  console.log(`[build] 2026-10-20 — UI: empty-window notice + sticky filters`);
+  console.log(`[build] 2026-10-21 — JV: per-line From/To, reverse/delete actions`);
 });
