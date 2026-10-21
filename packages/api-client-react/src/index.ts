@@ -710,6 +710,8 @@ export type JournalEntryDetail = {
     currency: string;
     exchangeRate: number;
     memo: string;
+    /** Sub-ledger tag, so a correction can carry the party across. */
+    contactId: number | null;
   }[];
 };
 

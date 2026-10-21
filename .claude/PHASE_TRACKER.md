@@ -4887,3 +4887,56 @@ removed; the temporary dev login was removed too.
 immediately — so the Draft branches of this menu are reachable only for
 drafts created another way. They are built and tested, not dead, but today
 they have no producer.
+
+---
+
+## 2026-10-21 (final) — JV: From / To moved into the line rows
+
+Supersedes a header-based attempt that was **reverted before it was ever
+committed** (Account / From / To in the top header, auto-generating the two
+lines). Nothing of it reached main.
+
+**Where things ended up**
+- Header: **Date · Reference # · Entity · Description**. Nothing else.
+- Line grid: **Account · Entity · From / To · Currency · Debit · Credit ·
+  Description / Line Memo**, so a line says who it is with, the same shape
+  the pending bank feed uses.
+- The picker is the existing `<ContactSelect>` the banking hub already uses
+  — same component, same placeholder, same quick-create — scoped to that
+  line's entity (a contact must be that entity's own or Shared; the server
+  enforces it too).
+- `contactId` posts with the line, so the Customer/Vendor sub-ledger
+  balance — derived from tagged Posted lines — moves with the entry.
+- Correcting an entry now carries its contact tags back into the form,
+  which the header version could not do (there was no field to put them
+  in).
+- Column widths keys bumped (`…columns.v3`, `…fx-columns.v2`) since a
+  column was added.
+
+**A real bug found and fixed while testing.** Changing the header Entity
+moves the lines with it, but that path bypassed the check that drops an
+account or contact the new entity may not use — a line could sit on
+TekRevol TX while still tagged with a TekRevol CA customer, which the
+server would refuse on posting or, worse, would move a sub-ledger balance
+that never belonged to it. The check is now one helper
+(`dropMismatchedRefs`) used by **both** the per-line edit and the header
+sync. Re-tested: tagging a CA customer and then switching the header to TX
+clears the tag.
+
+**Verified** against the dev server, in the browser: header and line column
+order read back from the DOM exactly as above; the picker lists the Shared
+vendor plus the selected entity's own customer and nothing else; tagging a
+line then posting produced `JE-2026-000011` with `Dr 1040 EIB AED` carrying
+**Multi Transport (Vendor)** and the other line untagged, trial balance
+still equal. Test entry and the temporary dev login were removed; the dev
+ledger is back to its baseline (14,268.74 Dr = Cr, no orphans).
+
+`pnpm run typecheck` clean, 25/25 tests pass, `pnpm run build` clean.
+
+**Worth knowing for the next session:** driving this screen with synthetic
+clicks is unreliable — Radix leaves `body { pointer-events: none }` and
+leaves popovers mounted when clicks arrive without the full pointer event
+sequence, so later clicks fall through. It is a harness artifact, not a
+page defect (real pointer input restores it). Drive inputs by focusing the
+element and typing, and open/select popover items with `.click()`, rather
+than fighting coordinates.

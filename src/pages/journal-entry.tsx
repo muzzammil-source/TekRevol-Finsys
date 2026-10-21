@@ -1,7 +1,7 @@
 import React, { useMemo, useState } from 'react';
 import { format } from 'date-fns';
 import { useQueryClient } from '@tanstack/react-query';
-import { fetchExchangeRate, fetchJournalEntry, useCreateJournalEntry, useDeleteJournalEntry, useListAccounts, useListEntities, useListJournalEntries, useReverseJournalEntry } from '@workspace/api-client-react';
+import { fetchExchangeRate, fetchJournalEntry, getListContactsQueryKey, useCreateContact, useCreateJournalEntry, useDeleteJournalEntry, useListAccounts, useListContacts, useListEntities, useListJournalEntries, useReverseJournalEntry, type Contact, type ContactType } from '@workspace/api-client-react';
 import { PageContent, PageHeader, SurfaceCard } from '@/components/layout';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import {
@@ -19,6 +19,7 @@ import { useToast } from '@/hooks/use-toast';
 import { CURRENCIES, entityLabel } from '@/lib/constants';
 import { useAuth } from '@/lib/auth';
 import { GLAccountSelect } from '@/components/gl-account-select';
+import { ContactSelect } from '@/components/contact-select';
 import { QuickAccountDialog } from '@/components/quick-account-dialog';
 import { ResizableColGroup, ResizableHeaderCells, defaultWidths, useResizableColumns, type ResizableColumnDef } from '@/components/resizable-columns';
 import { invalidateLedgerDerivedQueries } from '@/lib/ledger-queries';
@@ -46,6 +47,7 @@ import { MoreHorizontal, Pencil, PlusCircle, Trash2, Undo2 } from 'lucide-react'
 const BASE_COLUMNS: ResizableColumnDef[] = [
   { key: 'account', label: 'Account', width: 230 },
   { key: 'entity', label: 'Entity', width: 130 },
+  { key: 'fromTo', label: 'From / To', width: 170 },
   { key: 'currency', label: 'Currency', width: 95 },
   { key: 'debit', label: 'Debit', width: 120, align: 'right' },
   { key: 'credit', label: 'Credit', width: 120, align: 'right' },
@@ -55,6 +57,7 @@ const BASE_COLUMNS: ResizableColumnDef[] = [
 const FX_COLUMNS: ResizableColumnDef[] = [
   { key: 'account', label: 'Account', width: 200 },
   { key: 'entity', label: 'Entity', width: 120 },
+  { key: 'fromTo', label: 'From / To', width: 150 },
   { key: 'currency', label: 'Currency', width: 95 },
   { key: 'debit', label: 'Debit', width: 110, align: 'right' },
   { key: 'credit', label: 'Credit', width: 110, align: 'right' },
@@ -74,6 +77,11 @@ type JeLine = {
   rate: string;
   /** True once the user edits the rate, so it is never re-filled under them. */
   rateTouched?: boolean;
+  /** Sub-ledger tag: the Customer/Vendor this line settles, if any. Only
+      the line that actually hits A/R, A/P or the party's own account is
+      tagged — never the cash or clearing side (see the contacts notes in
+      server/index.ts). */
+  contactId?: string;
 };
 
 const newLine = (patch: Partial<JeLine> = {}): JeLine => ({
@@ -85,6 +93,7 @@ const newLine = (patch: Partial<JeLine> = {}): JeLine => ({
   credit: '',
   currency: 'USD',
   rate: '',
+  contactId: '',
   ...patch,
 });
 
@@ -336,6 +345,28 @@ export default function JournalEntryPage() {
   const entities = useMemo(() => (entitiesData || []) as any[], [entitiesData]);
   const { data: accountsData } = useListAccounts();
   const accounts = useMemo(() => (accountsData || []) as any[], [accountsData]);
+  // All active contacts; each line's picker scopes them to that line's
+  // entity, exactly as the pending bank feed does.
+  const { data: contactsData } = useListContacts();
+  const contacts = useMemo(() => (contactsData || []) as Contact[], [contactsData]);
+  const createContact = useCreateContact();
+  const canWriteContacts = can('contacts.write');
+  // Quick-create from a picker, owned by the entity whose ledger the line
+  // lands in. Written into the cache immediately so the new party shows as
+  // selected without waiting for the refetch.
+  const handleCreateContact = (entityId: string) => async (name: string, contactType: ContactType): Promise<Contact> => {
+    try {
+      const created = await createContact.mutateAsync({ name, contactType, entityId: entityId ? Number(entityId) : null });
+      queryClient.setQueryData<Contact[]>(getListContactsQueryKey(), (old) => [...(old || []), created]);
+      queryClient.invalidateQueries({ queryKey: getListContactsQueryKey() });
+      toast({ title: `${contactType} “${created.name}” added` });
+      return created;
+    } catch (err: any) {
+      toast({ title: 'Could not add contact', description: err.message, variant: 'destructive' });
+      throw err;
+    }
+  };
+
   const { data: recentData } = useListJournalEntries();
   const manualEntries = useMemo(
     () => ((recentData || []) as any[]).filter((e) => e.source === 'ManualJournal'),
@@ -360,6 +391,10 @@ export default function JournalEntryPage() {
   const [editingDraft, setEditingDraft] = useState<{ id: number; entryNumber: string } | null>(null);
   const formRef = React.useRef<HTMLDivElement | null>(null);
 
+  // The entry's entity. Lines may still differ (a cross-entity sheet posts
+  // one balanced entry per entity), so this drives them rather than locking
+  // them: changing it moves every line still sitting on the old value.
+  const [headerEntityId, setHeaderEntityId] = useState('');
   const defaultEntityId = entities[0] ? String(entities[0].id) : '';
   const [transactionDate, setTransactionDate] = useState(format(new Date(), 'yyyy-MM-dd'));
   const [reference, setReference] = useState('');
@@ -410,15 +445,43 @@ export default function JournalEntryPage() {
   };
   const multiCurrency = foreignCurrencies.length > 0;
   const columnDefs = multiCurrency ? FX_COLUMNS : BASE_COLUMNS;
-  const baseColumns = useResizableColumns('finsys.journal-entry.columns.v2', BASE_WIDTHS);
-  const fxColumns = useResizableColumns('finsys.journal-entry.fx-columns.v1', FX_WIDTHS);
+  const baseColumns = useResizableColumns('finsys.journal-entry.columns.v3', BASE_WIDTHS);
+  const fxColumns = useResizableColumns('finsys.journal-entry.fx-columns.v2', FX_WIDTHS);
   const columns = multiCurrency ? fxColumns : baseColumns;
 
   // Seed the entity once the list arrives.
   React.useEffect(() => {
     if (!defaultEntityId) return;
     setLines((prev) => prev.map((l) => (l.entityId ? l : { ...l, entityId: defaultEntityId })));
+    setHeaderEntityId((prev) => prev || defaultEntityId);
   }, [defaultEntityId]);
+
+  // A line left on the old entity would post to different books than the
+  // header says, so the two are kept together.
+  const previousHeaderEntity = React.useRef(headerEntityId);
+  React.useEffect(() => {
+    const before = previousHeaderEntity.current;
+    previousHeaderEntity.current = headerEntityId;
+    if (!headerEntityId || !before || before === headerEntityId) return;
+    setLines((prev) => prev.map((l) => (l.entityId === before ? dropMismatchedRefs({ ...l, entityId: headerEntityId }) : l)));
+    // dropMismatchedRefs reads the latest accounts/contacts; re-running on
+    // their identity would re-fire this sync, so only the entity is watched.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [headerEntityId]);
+
+  /** Clears an account or contact that this line's entity may not use. */
+  const dropMismatchedRefs = (line: JeLine): JeLine => {
+    const next = { ...line };
+    if (next.accountId) {
+      const account = accounts.find((a) => String(a.id) === String(next.accountId));
+      if (account && account.entityId != null && String(account.entityId) !== String(next.entityId)) next.accountId = '';
+    }
+    if (next.contactId) {
+      const contact = contacts.find((c) => String(c.id) === String(next.contactId));
+      if (contact && contact.entityId != null && String(contact.entityId) !== String(next.entityId)) next.contactId = '';
+    }
+    return next;
+  };
 
   const update = (id: string, patch: Partial<JeLine>) =>
     setLines((prev) => prev.map((l) => {
@@ -433,11 +496,12 @@ export default function JournalEntryPage() {
         next.rateTouched = false;
       }
       if (patch.rate !== undefined) next.rateTouched = true;
-      // Changing the entity drops an account that entity can't book.
-      if (patch.entityId !== undefined && next.accountId) {
-        const account = accounts.find((a) => String(a.id) === String(next.accountId));
-        if (account && account.entityId != null && String(account.entityId) !== String(next.entityId)) next.accountId = '';
-      }
+      // Changing the entity drops an account or contact that entity can't
+      // use. Shared by the header-entity sync below, which moves lines
+      // without going through this function — a line left tagged with
+      // another entity's customer would be refused on posting, or worse,
+      // move a sub-ledger balance that never belonged to it.
+      if (patch.entityId !== undefined) return dropMismatchedRefs(next);
       return next;
     }));
 
@@ -481,9 +545,9 @@ export default function JournalEntryPage() {
    * posted entry has already been reversed by the time this runs, so the
    * form is simply a fresh entry that happens to start from its lines.
    *
-   * The entry's own contact tags are NOT carried across — this form has no
-   * contact field, and silently re-posting a contact the user can't see on
-   * screen would put a sub-ledger balance somewhere they didn't choose.
+   * Contact tags ARE carried across now that each line has a From / To
+   * field: they are visible on screen, so a correction keeps the party's
+   * sub-ledger balance moving with it instead of silently stranding it.
    */
   const loadIntoForm = async (entry: any, { asDraftEdit }: { asDraftEdit: boolean }) => {
     try {
@@ -507,9 +571,11 @@ export default function JournalEntryPage() {
             // original used.
             rate: l.currency && l.currency !== 'USD' ? String(l.exchangeRate ?? '') : '',
             rateTouched: Boolean(l.currency && l.currency !== 'USD'),
+            contactId: l.contactId ? String(l.contactId) : '',
           }),
         ),
       );
+      setHeaderEntityId(String(full.entityId));
       setEditingDraft(asDraftEdit ? { id: full.id, entryNumber: full.entryNumber } : null);
       formRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
       if (asDraftEdit) {
@@ -545,6 +611,9 @@ export default function JournalEntryPage() {
           credit: toCents(l.credit) / 100,
           currency: l.currency,
           ...(l.currency === 'USD' ? {} : { exchangeRate: rateOf(l) }),
+          // The sub-ledger tag, so the party's balance — derived from
+          // tagged Posted lines — moves with this entry.
+          ...(l.contactId ? { contactId: Number(l.contactId) } : {}),
           description: l.description.trim(),
         })),
       },
@@ -620,6 +689,15 @@ export default function JournalEntryPage() {
               <span className="mb-1 block text-xs font-medium">Reference # <span className="font-normal text-gray-400">(optional)</span></span>
               <Input value={reference} onChange={(e) => setReference(e.target.value)} placeholder="e.g. ADJ-2026-04" className="h-9 w-48" aria-label="Reference" />
             </label>
+            <label className="block w-44" data-je-header-entity>
+              <span className="mb-1 block text-xs font-medium">Entity</span>
+              <Select value={headerEntityId} onValueChange={setHeaderEntityId} disabled={!canPost}>
+                <SelectTrigger className="h-9 w-full px-2 text-xs" aria-label="Entity"><SelectValue placeholder="Entity" /></SelectTrigger>
+                <SelectContent>
+                  {entities.map((e) => <SelectItem key={e.id} value={String(e.id)}>{entityLabel(e.name)}</SelectItem>)}
+                </SelectContent>
+              </Select>
+            </label>
             <label className="block flex-1 min-w-[220px]">
               <span className="mb-1 block text-xs font-medium">Description <span className="font-normal text-gray-400">(optional)</span></span>
               <Input value={description} onChange={(e) => setDescription(e.target.value)} placeholder="What this entry records" className="h-9" aria-label="Description" />
@@ -656,6 +734,31 @@ export default function JournalEntryPage() {
                           {entities.map((e) => <SelectItem key={e.id} value={String(e.id)}>{entityLabel(e.name)}</SelectItem>)}
                         </SelectContent>
                       </Select>
+                    </TableCell>
+                    {/* From / To — the Customer or Vendor this line settles,
+                        the same picker and placement the pending bank feed
+                        uses. Tag only the line that actually hits the
+                        party's side (A/R, A/P, or the account they relate
+                        to); tagging the cash or clearing leg would move a
+                        sub-ledger balance that never belonged to them.
+                        Scoped to the line's own entity, because a contact
+                        must belong to that entity or be Shared. */}
+                    <TableCell>
+                      <ContactSelect
+                        contacts={contacts}
+                        entityId={l.entityId ? Number(l.entityId) : null}
+                        // Which group is listed first, nothing more: a debit
+                        // line is money arriving at this account, so its
+                        // counterparty is most often a Customer.
+                        direction={l.debit ? 'in' : 'out'}
+                        value={l.contactId || ''}
+                        onChange={(v) => update(l.id, { contactId: v })}
+                        onCreate={handleCreateContact(l.entityId)}
+                        canCreate={canWriteContacts}
+                        className="w-full min-w-0"
+                        placeholder="From/To"
+                        disabled={!canPost}
+                      />
                     </TableCell>
                     {/* Currency — USD by default; a foreign one reveals the
                         line's rate and its converted USD amounts. */}
